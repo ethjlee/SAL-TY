@@ -1,8 +1,14 @@
 [project]
 name = "sal-ty"
 version = "0.1.0"
-requires-python = ">=3.0"
+description = "salty project. perfect. awesome."
+readme = "README.md"
+requires-python = ">=3.8"
 dependencies = [
-    "torch>=1.5.1",
-    "torchvision>=0.11.3",
+    "matplotlib>=3.7.5",
+    "notebook>=7.3.3",
+    "numpy>=1.24.4",
+    "streetlevel>=0.12.5",
+    "torch>=2.5.1",
+    "torchvision>=0.20.1",
 ]
