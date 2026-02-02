@@ -1,0 +1,8 @@
+[project]
+name = "sal-ty"
+version = "0.1.0"
+requires-python = ">=3.0"
+dependencies = [
+    "torch>=1.5.1",
+    "torchvision>=0.11.3",
+]
