@@ -8,6 +8,7 @@ dependencies = [
     "matplotlib>=3.7.5",
     "notebook>=7.3.3",
     "numpy>=1.24.4",
+    "pandas>=2.0.3",
     "streetlevel>=0.12.5",
     "torch>=2.5.1",
     "torchvision>=0.20.1",
