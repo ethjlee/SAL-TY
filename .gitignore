@@ -2,3 +2,24 @@
 .venv/
 __pycache__/
 .python-version
+
+# Python
+*.pyc
+*.pyo
+*.egg-info
+.ipynb_checkpoints/
+
+# Scraper output directories
+test_output/
+salty_data/
+
+# Logs
+*.log
+
+# Temporary and debug files
+debug_*.py
+*_old.py
+
+# IDE
+.vscode/
+.idea/
