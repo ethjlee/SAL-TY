@@ -2,6 +2,11 @@
 SALTY Scraper - Google Street View Multi-View Data Acquisition
 Project SALTY: Street-view Attention Learning Telemetry
 
+CONFIGURATION: ZOOM 3, Quality 80
+- Higher resolution panoramas (ZOOM 3) for better detail capture
+- Quality 80 compression for efficient storage
+- Optimized for ML training (ViT-based models)
+
 This script downloads Google Street View panoramas and extracts 4 directional views
 (0°, 90°, 180°, 270°) for each location. Each location gets its own subfolder with
 the 4 perspective views.
@@ -55,7 +60,7 @@ REJECTS_FILE = OUTPUT_DIR / "rejects.csv"
 LOG_FILE = OUTPUT_DIR / "scraper.log"
 
 # Download settings
-PANO_ZOOM = 2  # Zoom level for downloading equirectangular panorama
+PANO_ZOOM = 3  # Zoom level for downloading equirectangular panorama (HIGHER RESOLUTION)
 VIEW_HEIGHT = 1024  # Height of extracted perspective views
 VIEW_WIDTH = 1024   # Width of extracted perspective views
 VIEW_FOV = 90.0     # Field of view for perspective views (degrees)
@@ -211,7 +216,7 @@ def extract_perspective_views(pano_image, headings, output_dir, index):
             # Convert to PIL Image and save
             view_image = Image.fromarray(view_array)
             output_path = output_dir / f"{heading:03d}.jpg"
-            view_image.save(output_path, quality=95)
+            view_image.save(output_path, quality=80)
 
         return True
 
@@ -365,6 +370,7 @@ def main():
     print("=" * 70)
     print("SALTY SCRAPER - Multi-View Google Street View Data Acquisition")
     print("Project: Street-view Attention Learning Telemetry")
+    print("CONFIGURATION: ZOOM 3 @ Quality 80")
     print("=" * 70)
     print()
 
@@ -389,6 +395,8 @@ def main():
     print(f"")
     print(f"Output: 4 views per location (0, 90, 180, 270 degrees)")
     print(f"View size: {VIEW_WIDTH}x{VIEW_HEIGHT} @ {VIEW_FOV} degree FOV")
+    print(f"Panorama zoom: {PANO_ZOOM} (Higher resolution)")
+    print(f"JPEG quality: 80 (Optimized for ML)")
     print(f"Stealth: {MIN_SLEEP}-{MAX_SLEEP}s per location")
     print(f"Output directory: {OUTPUT_DIR}")
     print()
@@ -405,7 +413,7 @@ def main():
 
     print()
     logging.info("="*50)
-    logging.info("Starting SALTY multi-view scraper")
+    logging.info("Starting SALTY multi-view scraper (ZOOM 3, Q80)")
     logging.info(f"Target: {remaining:,} locations")
     logging.info("="*50)
 
