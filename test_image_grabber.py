@@ -29,12 +29,13 @@ COMPLETED_FILE = OUTPUT_DIR / "completed.csv"
 REJECTS_FILE = OUTPUT_DIR / "rejects.csv"
 LOG_FILE = OUTPUT_DIR / "scraper.log"
 
-# Download settings
-PANO_ZOOM = 2  # Zoom level for downloading equirectangular panorama
+# Download settings - TESTING ZOOM 3 @ QUALITY 90
+PANO_ZOOM = 3  # Zoom level for downloading equirectangular panorama (HIGHER RES)
 VIEW_HEIGHT = 1024  # Height of extracted perspective views
 VIEW_WIDTH = 1024   # Width of extracted perspective views
 VIEW_FOV = 90.0     # Field of view for perspective views (degrees)
 HEADINGS = [0, 90, 180, 270]  # Cardinal directions to extract
+JPEG_QUALITY = 90  # JPEG quality for testing
 
 # TEST settings - lighter delays
 MIN_SLEEP = 2   # Lighter for testing
@@ -185,7 +186,7 @@ def extract_perspective_views(pano_image, headings, output_dir, index):
             # Convert to PIL Image and save
             view_image = Image.fromarray(view_array)
             output_path = output_dir / f"{heading:03d}.jpg"
-            view_image.save(output_path, quality=95)
+            view_image.save(output_path, quality=JPEG_QUALITY)
 
         return True
 

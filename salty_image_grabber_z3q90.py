@@ -2,10 +2,10 @@
 SALTY Scraper - Google Street View Multi-View Data Acquisition
 Project SALTY: Street-view Attention Learning Telemetry
 
-CONFIGURATION: ZOOM 3, Quality 80
+CONFIGURATION: ZOOM 3, Quality 90
 - Higher resolution panoramas (ZOOM 3) for better detail capture
-- Quality 80 compression for efficient storage
-- Optimized for ML training (ViT-based models)
+- Quality 90 compression for OCR and ML training
+- Optimized for Vision Transformers and OCR tasks
 
 This script downloads Google Street View panoramas and extracts 4 directional views
 (0°, 90°, 180°, 270°) for each location. Each location gets its own subfolder with
@@ -216,7 +216,7 @@ def extract_perspective_views(pano_image, headings, output_dir, index):
             # Convert to PIL Image and save
             view_image = Image.fromarray(view_array)
             output_path = output_dir / f"{heading:03d}.jpg"
-            view_image.save(output_path, quality=80)
+            view_image.save(output_path, quality=90)
 
         return True
 
@@ -370,7 +370,7 @@ def main():
     print("=" * 70)
     print("SALTY SCRAPER - Multi-View Google Street View Data Acquisition")
     print("Project: Street-view Attention Learning Telemetry")
-    print("CONFIGURATION: ZOOM 3 @ Quality 80")
+    print("CONFIGURATION: ZOOM 3 @ Quality 90")
     print("=" * 70)
     print()
 
@@ -396,7 +396,7 @@ def main():
     print(f"Output: 4 views per location (0, 90, 180, 270 degrees)")
     print(f"View size: {VIEW_WIDTH}x{VIEW_HEIGHT} @ {VIEW_FOV} degree FOV")
     print(f"Panorama zoom: {PANO_ZOOM} (Higher resolution)")
-    print(f"JPEG quality: 80 (Optimized for ML)")
+    print(f"JPEG quality: 90 (Optimized for OCR/ML)")
     print(f"Stealth: {MIN_SLEEP}-{MAX_SLEEP}s per location")
     print(f"Output directory: {OUTPUT_DIR}")
     print()
@@ -405,15 +405,16 @@ def main():
         print("All locations processed!")
         return
 
-    # Confirmation
-    response = input("Start/resume download? [y/N]: ")
+    # Confirmation (auto-confirmed for unattended operation)
+    response = 'y'  # Auto-confirm for detached mode
+    # response = input("Start/resume download? [y/N]: ")  # Commented out for unattended runs
     if response.lower() != 'y':
         print("Aborted.")
         return
 
     print()
     logging.info("="*50)
-    logging.info("Starting SALTY multi-view scraper (ZOOM 3, Q80)")
+    logging.info("Starting SALTY multi-view scraper (ZOOM 3, Q90)")
     logging.info(f"Target: {remaining:,} locations")
     logging.info("="*50)
 
