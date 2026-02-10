@@ -67,8 +67,8 @@ VIEW_FOV = 90.0     # Field of view for perspective views (degrees)
 HEADINGS = [0, 90, 180, 270]  # Cardinal directions to extract
 
 # Stealth settings
-MIN_SLEEP = 1.5   # Minimum seconds between requests
-MAX_SLEEP = 3.5  # Maximum seconds between requests
+MIN_SLEEP = 2.0   # Minimum seconds between requests
+MAX_SLEEP = 5.0  # Maximum seconds between requests
 SUB_BATCH = 250  # Checkpoint interval
 SUB_BATCH_SLEEP = 15  # Pause after sub-batch (seconds)
 FULL_BATCH = 2000  # Major checkpoint interval
@@ -76,6 +76,7 @@ FULL_BATCH_SLEEP = 60  # Pause after full batch (5 minutes)
 
 # Error handling
 MAX_CONSECUTIVE_TIMEOUTS = 5  # Terminate after this many consecutive timeouts
+MAX_CONSECUTIVE_ERRORS = 10   # Terminate after this many consecutive errors of ANY type (likely IP ban)
 
 # Setup logging
 def setup_logging():
@@ -216,7 +217,7 @@ def extract_perspective_views(pano_image, headings, output_dir, index):
             # Convert to PIL Image and save
             view_image = Image.fromarray(view_array)
             output_path = output_dir / f"{heading:03d}.jpg"
-            view_image.save(output_path, quality=90)
+            view_image.save(output_path, quality=90, optimize=True)
 
         return True
 
@@ -423,6 +424,7 @@ def main():
     error_count = 0
     processed = 0
     consecutive_timeouts = 0
+    consecutive_errors = 0
 
     # Create nested progress bars - overall, full batch, sub-batch
     with tqdm(
@@ -461,10 +463,12 @@ def main():
                         success_count += 1
                         completed.add(idx)
                         consecutive_timeouts = 0  # Reset on success
+                        consecutive_errors = 0    # Reset on success
                     else:
                         if reason not in ["already_completed", "already_rejected"]:
                             error_count += 1
                             rejected.add(idx)
+                            consecutive_errors += 1
 
                             # Track consecutive timeouts
                             if reason == "timeout":
@@ -479,6 +483,14 @@ def main():
                                     break
                             else:
                                 consecutive_timeouts = 0  # Reset on non-timeout error
+
+                            # Track consecutive errors of ANY type (IP ban detection)
+                            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                                logging.error(f"TERMINATING: {MAX_CONSECUTIVE_ERRORS} consecutive errors reached. Possible IP ban.")
+                                pbar_overall.write(f"\nERROR: {MAX_CONSECUTIVE_ERRORS} consecutive errors detected.")
+                                pbar_overall.write("This likely indicates an IP ban or API block.")
+                                pbar_overall.write(f"Progress saved. {success_count} locations downloaded before termination.")
+                                break
 
                     processed += 1
 
