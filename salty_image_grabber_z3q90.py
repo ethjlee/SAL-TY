@@ -67,8 +67,8 @@ VIEW_FOV = 90.0     # Field of view for perspective views (degrees)
 HEADINGS = [0, 90, 180, 270]  # Cardinal directions to extract
 
 # Stealth settings
-MIN_SLEEP = 0.5   # Minimum seconds between requests
-MAX_SLEEP = 2.5  # Maximum seconds between requests
+MIN_SLEEP = 0.25   # Minimum seconds between requests
+MAX_SLEEP = 1.0  # Maximum seconds between requests
 SUB_BATCH = 250  # Checkpoint interval
 SUB_BATCH_SLEEP = 15  # Pause after sub-batch (seconds)
 FULL_BATCH = 2000  # Major checkpoint interval
