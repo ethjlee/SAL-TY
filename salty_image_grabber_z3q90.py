@@ -67,8 +67,8 @@ VIEW_FOV = 90.0     # Field of view for perspective views (degrees)
 HEADINGS = [0, 90, 180, 270]  # Cardinal directions to extract
 
 # Stealth settings
-MIN_SLEEP = 2.0   # Minimum seconds between requests
-MAX_SLEEP = 5.0  # Maximum seconds between requests
+MIN_SLEEP = 0.5   # Minimum seconds between requests
+MAX_SLEEP = 2.5  # Maximum seconds between requests
 SUB_BATCH = 250  # Checkpoint interval
 SUB_BATCH_SLEEP = 15  # Pause after sub-batch (seconds)
 FULL_BATCH = 2000  # Major checkpoint interval
@@ -253,6 +253,7 @@ def download_location(row, completed_indices, rejected_indices):
     if idx in rejected_indices:
         return False, "already_rejected"
 
+    tmp_path = None
     try:
         # Find nearest panorama
         pano = streetview.find_panorama(lat, lon)
@@ -292,6 +293,7 @@ def download_location(row, completed_indices, rejected_indices):
             Path(tmp_path).unlink()
         except Exception as e:
             logging.warning(f"[{idx}] Could not delete temp file: {e}")
+        tmp_path = None
 
         if not success:
             logging.error(f"[{idx}] Failed to extract views")
@@ -335,6 +337,14 @@ def download_location(row, completed_indices, rejected_indices):
         logging.error(traceback.format_exc())
         save_reject(idx, lat, lon, f"error_{type(e).__name__}")
         return False, "exception"
+
+    finally:
+        # Clean up temp file if it wasn't already deleted
+        if tmp_path:
+            try:
+                Path(tmp_path).unlink()
+            except Exception:
+                pass
 
 def stealth_sleep(count, pbar=None):
     """
@@ -466,31 +476,37 @@ def main():
                         consecutive_errors = 0    # Reset on success
                     else:
                         if reason not in ["already_completed", "already_rejected"]:
-                            error_count += 1
                             rejected.add(idx)
-                            consecutive_errors += 1
 
-                            # Track consecutive timeouts
-                            if reason == "timeout":
-                                consecutive_timeouts += 1
-                                logging.warning(f"Consecutive timeouts: {consecutive_timeouts}/{MAX_CONSECUTIVE_TIMEOUTS}")
+                            # Non-error rejections (API worked, just no usable panorama)
+                            if reason in ["no_panorama"] or reason.startswith("qc_failed"):
+                                consecutive_timeouts = 0  # API responded, network is fine
+                                consecutive_errors = 0
+                            else:
+                                error_count += 1
+                                consecutive_errors += 1
 
-                                if consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS:
-                                    logging.error(f"TERMINATING: {MAX_CONSECUTIVE_TIMEOUTS} consecutive timeouts reached")
-                                    pbar_overall.write(f"\nERROR: {MAX_CONSECUTIVE_TIMEOUTS} consecutive network timeouts.")
-                                    pbar_overall.write("This likely indicates a network or API issue.")
+                                # Track consecutive timeouts
+                                if reason == "timeout":
+                                    consecutive_timeouts += 1
+                                    logging.warning(f"Consecutive timeouts: {consecutive_timeouts}/{MAX_CONSECUTIVE_TIMEOUTS}")
+
+                                    if consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS:
+                                        logging.error(f"TERMINATING: {MAX_CONSECUTIVE_TIMEOUTS} consecutive timeouts reached")
+                                        pbar_overall.write(f"\nERROR: {MAX_CONSECUTIVE_TIMEOUTS} consecutive network timeouts.")
+                                        pbar_overall.write("This likely indicates a network or API issue.")
+                                        pbar_overall.write(f"Progress saved. {success_count} locations downloaded before termination.")
+                                        break
+                                else:
+                                    consecutive_timeouts = 0  # Reset on non-timeout error
+
+                                # Track consecutive errors of ANY type (IP ban detection)
+                                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                                    logging.error(f"TERMINATING: {MAX_CONSECUTIVE_ERRORS} consecutive errors reached. Possible IP ban.")
+                                    pbar_overall.write(f"\nERROR: {MAX_CONSECUTIVE_ERRORS} consecutive errors detected.")
+                                    pbar_overall.write("This likely indicates an IP ban or API block.")
                                     pbar_overall.write(f"Progress saved. {success_count} locations downloaded before termination.")
                                     break
-                            else:
-                                consecutive_timeouts = 0  # Reset on non-timeout error
-
-                            # Track consecutive errors of ANY type (IP ban detection)
-                            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
-                                logging.error(f"TERMINATING: {MAX_CONSECUTIVE_ERRORS} consecutive errors reached. Possible IP ban.")
-                                pbar_overall.write(f"\nERROR: {MAX_CONSECUTIVE_ERRORS} consecutive errors detected.")
-                                pbar_overall.write("This likely indicates an IP ban or API block.")
-                                pbar_overall.write(f"Progress saved. {success_count} locations downloaded before termination.")
-                                break
 
                     processed += 1
 
