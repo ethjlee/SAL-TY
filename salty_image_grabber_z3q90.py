@@ -438,24 +438,29 @@ def backfill_metadata():
                     pbar.update(1)
                     continue
 
-                pano = streetview.find_panorama(
-                    metadata['original_lat'],
-                    metadata['original_lon']
-                )
+                # Try by pano ID first (exact match), fall back to coordinates
+                pano = streetview.find_panorama_by_id(metadata['panoid'])
+                if pano is None:
+                    pano = streetview.find_panorama(
+                        metadata['original_lat'],
+                        metadata['original_lon']
+                    )
+                    if pano is None or pano.id != metadata['panoid']:
+                        logging.warning(f"Backfill: panoid {metadata['panoid']} not found for {meta_path.name}, skipping")
+                        pbar.update(1)
+                        time.sleep(random.uniform(MIN_SLEEP, MAX_SLEEP))
+                        continue
 
-                if pano and pano.id == metadata['panoid']:
-                    metadata['heading'] = getattr(pano, 'heading', None)
-                    metadata['pitch'] = getattr(pano, 'pitch', None)
-                    metadata['roll'] = getattr(pano, 'roll', None)
-                    metadata['street_names'] = [str(s) for s in pano.street_names] if getattr(pano, 'street_names', None) else None
-                    metadata['address'] = str(pano.address) if getattr(pano, 'address', None) else None
-                    metadata['country_code'] = str(pano.country_code) if getattr(pano, 'country_code', None) else None
+                metadata['heading'] = getattr(pano, 'heading', None)
+                metadata['pitch'] = getattr(pano, 'pitch', None)
+                metadata['roll'] = getattr(pano, 'roll', None)
+                metadata['street_names'] = [str(s) for s in pano.street_names] if getattr(pano, 'street_names', None) else None
+                metadata['address'] = str(pano.address) if getattr(pano, 'address', None) else None
+                metadata['country_code'] = str(pano.country_code) if getattr(pano, 'country_code', None) else None
 
-                    with open(meta_path, 'w') as f:
-                        json.dump(metadata, f, indent=2)
-                    updated += 1
-                else:
-                    logging.warning(f"Backfill: panoid mismatch for {meta_path.name}, skipping")
+                with open(meta_path, 'w') as f:
+                    json.dump(metadata, f, indent=2)
+                updated += 1
 
                 consecutive_errors = 0
                 pbar.update(1)
