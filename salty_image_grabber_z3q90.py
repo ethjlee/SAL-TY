@@ -433,30 +433,44 @@ def backfill_metadata():
                     time.sleep(random.uniform(MIN_SLEEP, MAX_SLEEP))
                     continue
 
-                # Normal backfill: skip if already has new fields
-                if 'heading' in metadata:
+                # Check which fields are missing
+                api_fields = ['heading', 'pitch', 'roll', 'street_names', 'address', 'country_code']
+                config_fields = {'headings': HEADINGS, 'view_resolution': f"{VIEW_WIDTH}x{VIEW_HEIGHT}", 'view_fov': VIEW_FOV}
+                fixable_fields = api_fields + list(config_fields.keys())
+
+                missing = [f for f in fixable_fields if f not in metadata]
+                if not missing:
                     pbar.update(1)
                     continue
 
-                # Try by pano ID first (exact match), fall back to coordinates
-                pano = streetview.find_panorama_by_id(metadata['panoid'])
-                if pano is None:
-                    pano = streetview.find_panorama(
-                        metadata['original_lat'],
-                        metadata['original_lon']
-                    )
-                    if pano is None or pano.id != metadata['panoid']:
-                        logging.warning(f"Backfill: panoid {metadata['panoid']} not found for {meta_path.name}, skipping")
-                        pbar.update(1)
-                        time.sleep(random.uniform(MIN_SLEEP, MAX_SLEEP))
-                        continue
+                # Fill in config fields (no API call needed)
+                needs_api = False
+                for field in missing:
+                    if field in config_fields:
+                        metadata[field] = config_fields[field]
+                    elif field in api_fields:
+                        needs_api = True
 
-                metadata['heading'] = getattr(pano, 'heading', None)
-                metadata['pitch'] = getattr(pano, 'pitch', None)
-                metadata['roll'] = getattr(pano, 'roll', None)
-                metadata['street_names'] = [str(s) for s in pano.street_names] if getattr(pano, 'street_names', None) else None
-                metadata['address'] = str(pano.address) if getattr(pano, 'address', None) else None
-                metadata['country_code'] = str(pano.country_code) if getattr(pano, 'country_code', None) else None
+                # Fill in API fields if needed
+                if needs_api:
+                    pano = streetview.find_panorama_by_id(metadata['panoid'])
+                    if pano is None:
+                        pano = streetview.find_panorama(
+                            metadata['original_lat'],
+                            metadata['original_lon']
+                        )
+                        if pano is None or pano.id != metadata['panoid']:
+                            logging.warning(f"Backfill: panoid {metadata['panoid']} not found for {meta_path.name}, skipping")
+                            pbar.update(1)
+                            time.sleep(random.uniform(MIN_SLEEP, MAX_SLEEP))
+                            continue
+
+                    metadata['heading'] = getattr(pano, 'heading', None)
+                    metadata['pitch'] = getattr(pano, 'pitch', None)
+                    metadata['roll'] = getattr(pano, 'roll', None)
+                    metadata['street_names'] = [str(s) for s in pano.street_names] if getattr(pano, 'street_names', None) else None
+                    metadata['address'] = str(pano.address) if getattr(pano, 'address', None) else None
+                    metadata['country_code'] = str(pano.country_code) if getattr(pano, 'country_code', None) else None
 
                 with open(meta_path, 'w') as f:
                     json.dump(metadata, f, indent=2)
@@ -464,7 +478,8 @@ def backfill_metadata():
 
                 consecutive_errors = 0
                 pbar.update(1)
-                time.sleep(random.uniform(MIN_SLEEP, MAX_SLEEP))
+                if needs_api:
+                    time.sleep(random.uniform(MIN_SLEEP, MAX_SLEEP))
 
             except Exception as e:
                 logging.warning(f"Backfill error for {meta_path.name}: {e}")
