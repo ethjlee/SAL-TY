@@ -39,6 +39,7 @@ import pandas as pd
 import numpy as np
 import time
 import random
+import argparse
 from pathlib import Path
 from datetime import datetime
 from tqdm import tqdm
@@ -525,12 +526,34 @@ def stealth_sleep(count, pbar=None):
             pbar.write(f"\n[{count}] FULL BATCH CHECKPOINT - pausing {full_batch_sleep:.0f}s...")
         time.sleep(full_batch_sleep)
 
+def parse_args():
+    """Parse command-line arguments for parallel operation."""
+    parser = argparse.ArgumentParser(description='SALTY Street View Scraper')
+    parser.add_argument('--start-index', type=int, default=0,
+                        help='First coordinate index to process (inclusive, default: 0)')
+    parser.add_argument('--end-index', type=int, default=None,
+                        help='Last coordinate index to process (inclusive, default: all)')
+    return parser.parse_args()
+
+
 def main():
     """Main execution function."""
+    args = parse_args()
+
+    # Instance-specific file paths when running in parallel (start-index > 0)
+    if args.start_index > 0:
+        global COMPLETED_FILE, REJECTS_FILE, LOG_FILE
+        COMPLETED_FILE = OUTPUT_DIR / f"completed_{args.start_index}.csv"
+        REJECTS_FILE = OUTPUT_DIR / f"rejects_{args.start_index}.csv"
+        LOG_FILE = OUTPUT_DIR / f"scraper_{args.start_index}.log"
+
     print("=" * 70)
     print("SALTY SCRAPER - Multi-View Google Street View Data Acquisition")
     print("Project: Street-view Attention Learning Telemetry")
     print("CONFIGURATION: ZOOM 3 @ Quality 90")
+    if args.start_index > 0 or args.end_index is not None:
+        end_label = args.end_index if args.end_index is not None else "end"
+        print(f"ROW RANGE: rows {args.start_index} - {end_label} of CSV")
     print("=" * 70)
     print()
 
@@ -540,6 +563,15 @@ def main():
 
     # Load data
     coords_df = load_coordinates()
+
+    # Slice to assigned row range (for parallel operation)
+    # --start-index / --end-index are row positions in the CSV (0-99999),
+    # NOT first-column values (which are original source dataset IDs)
+    if args.start_index > 0 or args.end_index is not None:
+        end = args.end_index + 1 if args.end_index is not None else len(coords_df)
+        coords_df = coords_df.iloc[args.start_index:end].reset_index(drop=True)
+        logging.info(f"Row slice: {args.start_index} - {args.end_index or 'end'} → {len(coords_df)} coordinates")
+
     completed = load_completed()
     rejected = load_rejects()
 
