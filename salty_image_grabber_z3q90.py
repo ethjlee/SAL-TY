@@ -30,8 +30,6 @@ Output Structure:
 
 Stealth Protocol:
 - Randomized sleep between requests (0.25-1.0s)
-- Sub-batch pause after 250 images (15s)
-- Full batch checkpoint after 2000 images
 """
 
 import streetlevel.streetview as streetview
@@ -45,6 +43,7 @@ from datetime import datetime
 from tqdm import tqdm
 import json
 import logging
+import traceback
 from PIL import Image
 import pytorch360convert
 import torch
@@ -52,7 +51,7 @@ import tempfile
 from requests.exceptions import Timeout, ConnectionError
 
 # Configuration
-COORDS_FILE = "all_data.csv"
+COORDS_FILE = "100k-205k_data.csv"
 OUTPUT_DIR = Path("salty_data")
 IMAGES_DIR = OUTPUT_DIR / "images"
 METADATA_DIR = OUTPUT_DIR / "metadata"
@@ -70,10 +69,6 @@ HEADINGS = [0, 90, 180, 270]  # Cardinal directions to extract
 # Stealth settings
 MIN_SLEEP = 0.25   # Minimum seconds between requests
 MAX_SLEEP = 1.0  # Maximum seconds between requests
-SUB_BATCH = 250  # Checkpoint interval
-SUB_BATCH_SLEEP = 15  # Pause after sub-batch (seconds)
-FULL_BATCH = 2000  # Major checkpoint interval
-FULL_BATCH_SLEEP = 60  # Pause after full batch (5 minutes)
 
 # Error handling
 MAX_CONSECUTIVE_TIMEOUTS = 5  # Terminate after this many consecutive timeouts
@@ -179,7 +174,7 @@ def is_quality_panorama(pano):
     # If no copyright message, reject to be safe
     return False, "no_copyright_info"
 
-def extract_perspective_views(pano_image, headings, output_dir, index):
+def extract_perspective_views(pano_image, headings, output_dir):
     """
     Extract perspective views at specified headings from equirectangular panorama.
 
@@ -187,7 +182,6 @@ def extract_perspective_views(pano_image, headings, output_dir, index):
         pano_image: PIL Image of equirectangular panorama
         headings: List of heading angles in degrees
         output_dir: Path to save extracted views
-        index: Location index for filenames
 
     Returns:
         bool: Success status
@@ -224,7 +218,6 @@ def extract_perspective_views(pano_image, headings, output_dir, index):
 
     except Exception as e:
         logging.error(f"Error extracting views: {str(e)}")
-        import traceback
         logging.error(traceback.format_exc())
         return False
 
@@ -284,7 +277,7 @@ def download_location(row, completed_indices, rejected_indices):
         pano_image = Image.open(tmp_path)
 
         # Extract 4 directional views
-        success = extract_perspective_views(pano_image, HEADINGS, location_dir, idx)
+        success = extract_perspective_views(pano_image, HEADINGS, location_dir)
 
         # Close image to release file handle before deleting
         pano_image.close()
@@ -340,7 +333,6 @@ def download_location(row, completed_indices, rejected_indices):
 
     except Exception as e:
         logging.error(f"[{idx}] Error: {str(e)}")
-        import traceback
         logging.error(traceback.format_exc())
         save_reject(idx, lat, lon, f"error_{type(e).__name__}")
         return False, "exception"
@@ -496,35 +488,11 @@ def backfill_metadata():
     logging.info(f"Backfill complete: {updated} updated, {repaired} repaired out of {len(metadata_files)} files")
     return True
 
-def stealth_sleep(count, pbar=None):
-    """
-    Implement stealth protocol with randomized delays.
-
-    Args:
-        count: Number of locations processed so far
-        pbar: Optional tqdm progress bar for clean output
-    """
-    # Base random sleep between requests
+def stealth_sleep():
+    """Randomized sleep between requests."""
     sleep_time = random.uniform(MIN_SLEEP, MAX_SLEEP)
     time.sleep(sleep_time)
 
-    # Sub-batch checkpoint with randomization
-    if count > 0 and count % SUB_BATCH == 0:
-        sub_batch_sleep = random.uniform(SUB_BATCH_SLEEP - 10, SUB_BATCH_SLEEP + 10)
-        msg = f"Sub-batch checkpoint at {count} locations. Sleeping {sub_batch_sleep:.1f}s..."
-        logging.info(msg)
-        if pbar:
-            pbar.write(f"\n[{count}] Sub-batch checkpoint - pausing {sub_batch_sleep:.0f}s...")
-        time.sleep(sub_batch_sleep)
-
-    # Full batch checkpoint with randomization
-    if count > 0 and count % FULL_BATCH == 0:
-        full_batch_sleep = random.uniform(FULL_BATCH_SLEEP - 30, FULL_BATCH_SLEEP + 30)
-        msg = f"FULL BATCH CHECKPOINT at {count} locations. Sleeping {full_batch_sleep:.1f}s..."
-        logging.info(msg)
-        if pbar:
-            pbar.write(f"\n[{count}] FULL BATCH CHECKPOINT - pausing {full_batch_sleep:.0f}s...")
-        time.sleep(full_batch_sleep)
 
 def parse_args():
     """Parse command-line arguments for parallel operation."""
@@ -622,101 +590,72 @@ def main():
     consecutive_timeouts = 0
     consecutive_errors = 0
 
-    # Create nested progress bars - overall, full batch, sub-batch
     with tqdm(
         total=remaining,
-        desc="Overall Progress",
-        position=0,
+        desc="Progress",
         leave=True,
-        bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]'
-    ) as pbar_overall:
-        with tqdm(
-            total=FULL_BATCH,
-            desc=f"Full Batch ({FULL_BATCH})",
-            position=1,
-            leave=False,
-            bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]'
-        ) as pbar_full:
-            with tqdm(
-                total=SUB_BATCH,
-                desc=f"Sub-Batch ({SUB_BATCH})",
-                position=2,
-                leave=False,
-                bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {postfix}]'
-            ) as pbar_sub:
+        miniters=1,
+        mininterval=0,
+        bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}, {postfix}]'
+    ) as pbar:
 
-                for _, row in coords_df.iterrows():
-                    idx = int(row.iloc[0])
+        for _, row in coords_df.iterrows():
+            idx = int(row.iloc[0])
 
-                    # Skip if already processed
-                    if idx in completed or idx in rejected:
-                        continue
+            # Skip if already processed
+            if idx in completed or idx in rejected:
+                continue
 
-                    # Download location with 4 views
-                    success, reason = download_location(row, completed, rejected)
+            # Download location with 4 views
+            success, reason = download_location(row, completed, rejected)
 
-                    if success:
-                        success_count += 1
-                        completed.add(idx)
-                        consecutive_timeouts = 0  # Reset on success
-                        consecutive_errors = 0    # Reset on success
+            if success:
+                success_count += 1
+                completed.add(idx)
+                consecutive_timeouts = 0  # Reset on success
+                consecutive_errors = 0    # Reset on success
+            else:
+                if reason not in ["already_completed", "already_rejected"]:
+                    rejected.add(idx)
+
+                    # Non-error rejections (API worked, just no usable panorama)
+                    if reason in ["no_panorama"] or reason.startswith("qc_failed"):
+                        consecutive_timeouts = 0  # API responded, network is fine
+                        consecutive_errors = 0
                     else:
-                        if reason not in ["already_completed", "already_rejected"]:
-                            rejected.add(idx)
+                        error_count += 1
+                        consecutive_errors += 1
 
-                            # Non-error rejections (API worked, just no usable panorama)
-                            if reason in ["no_panorama"] or reason.startswith("qc_failed"):
-                                consecutive_timeouts = 0  # API responded, network is fine
-                                consecutive_errors = 0
-                            else:
-                                error_count += 1
-                                consecutive_errors += 1
+                        # Track consecutive timeouts
+                        if reason == "timeout":
+                            consecutive_timeouts += 1
+                            logging.warning(f"Consecutive timeouts: {consecutive_timeouts}/{MAX_CONSECUTIVE_TIMEOUTS}")
 
-                                # Track consecutive timeouts
-                                if reason == "timeout":
-                                    consecutive_timeouts += 1
-                                    logging.warning(f"Consecutive timeouts: {consecutive_timeouts}/{MAX_CONSECUTIVE_TIMEOUTS}")
+                            if consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS:
+                                logging.error(f"TERMINATING: {MAX_CONSECUTIVE_TIMEOUTS} consecutive timeouts reached")
+                                pbar.write(f"\nERROR: {MAX_CONSECUTIVE_TIMEOUTS} consecutive network timeouts.")
+                                pbar.write("This likely indicates a network or API issue.")
+                                pbar.write(f"Progress saved. {success_count} locations downloaded before termination.")
+                                break
+                        else:
+                            consecutive_timeouts = 0  # Reset on non-timeout error
 
-                                    if consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS:
-                                        logging.error(f"TERMINATING: {MAX_CONSECUTIVE_TIMEOUTS} consecutive timeouts reached")
-                                        pbar_overall.write(f"\nERROR: {MAX_CONSECUTIVE_TIMEOUTS} consecutive network timeouts.")
-                                        pbar_overall.write("This likely indicates a network or API issue.")
-                                        pbar_overall.write(f"Progress saved. {success_count} locations downloaded before termination.")
-                                        break
-                                else:
-                                    consecutive_timeouts = 0  # Reset on non-timeout error
+                        # Track consecutive errors of ANY type (IP ban detection)
+                        if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                            logging.error(f"TERMINATING: {MAX_CONSECUTIVE_ERRORS} consecutive errors reached. Possible IP ban.")
+                            pbar.write(f"\nERROR: {MAX_CONSECUTIVE_ERRORS} consecutive errors detected.")
+                            pbar.write("This likely indicates an IP ban or API block.")
+                            pbar.write(f"Progress saved. {success_count} locations downloaded before termination.")
+                            break
 
-                                # Track consecutive errors of ANY type (IP ban detection)
-                                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
-                                    logging.error(f"TERMINATING: {MAX_CONSECUTIVE_ERRORS} consecutive errors reached. Possible IP ban.")
-                                    pbar_overall.write(f"\nERROR: {MAX_CONSECUTIVE_ERRORS} consecutive errors detected.")
-                                    pbar_overall.write("This likely indicates an IP ban or API block.")
-                                    pbar_overall.write(f"Progress saved. {success_count} locations downloaded before termination.")
-                                    break
+            processed += 1
 
-                    processed += 1
+            pbar.update(1)
+            pbar.set_postfix_str(f"✓ {success_count} ✗ {error_count} | rate:{success_count/processed*100:.0f}%")
 
-                    # Update all bars
-                    pbar_overall.update(1)
-                    pbar_full.update(1)
-                    pbar_sub.update(1)
-
-                    # Update sub-batch postfix
-                    pbar_sub.set_postfix_str(f"✓ {success_count} ✗ {error_count} | rate:{success_count/processed*100:.0f}%")
-
-                    # Reset sub-batch bar every 100
-                    if success_count > 0 and success_count % SUB_BATCH == 0:
-                        pbar_sub.n = 0
-                        pbar_sub.refresh()
-
-                    # Reset full batch bar every 1000
-                    if success_count > 0 and success_count % FULL_BATCH == 0:
-                        pbar_full.n = 0
-                        pbar_full.refresh()
-
-                    # Stealth sleep (only if we actually tried to download)
-                    if reason not in ["already_completed", "already_rejected"]:
-                        stealth_sleep(success_count, pbar_overall)
+            # Stealth sleep (only if we actually tried to download)
+            if reason not in ["already_completed", "already_rejected"]:
+                stealth_sleep()
 
     # Final summary
     print()
