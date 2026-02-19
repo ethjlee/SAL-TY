@@ -17,7 +17,7 @@ import re
 import sys
 import time
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from functools import partial
 from math import asin, cos, radians, sin, sqrt
 from pathlib import Path
@@ -493,7 +493,7 @@ def main():
         completed_panoids=completed_panoids,
     )
 
-    with ThreadPoolExecutor(max_workers=args.workers) as executor:
+    with ProcessPoolExecutor(max_workers=args.workers) as executor:
         futures = {executor.submit(worker, folder): folder for folder in folders}
         for future in tqdm(as_completed(futures), total=len(folders), desc="Scanning", unit="loc"):
             try:
