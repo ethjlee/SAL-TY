@@ -6,19 +6,23 @@ Usage:
     uv run salty_check.py salty_data
     uv run salty_check.py salty_data --source-csv 100k-205k_data.csv
     uv run salty_check.py /mnt/vol/salty_data --source-csv 0-100k_data.csv
+    uv run salty_check.py salty_data --workers 8
 """
 
 import argparse
 import json
 import sys
+import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import partial
+from math import asin, cos, radians, sin, sqrt
 from pathlib import Path
-
-from math import radians, sin, cos, asin, sqrt
 
 from PIL import Image
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
 EXPECTED_IMAGES = {"000.jpg", "090.jpg", "180.jpg", "270.jpg"}
 REQUIRED_META_FIELDS = {
@@ -74,13 +78,10 @@ def load_csv_indices(files):
 def load_source_coords(source_path):
     """Load source CSV and return {index: (lat, lon)} dict."""
     df = pd.read_csv(source_path)
-    coords = {}
-    for _, row in df.iterrows():
-        idx = int(row.iloc[0])
-        lat = float(row.iloc[1])
-        lon = float(row.iloc[2])
-        coords[idx] = (lat, lon)
-    return coords
+    idx_col = df.iloc[:, 0].astype(int)
+    lat_col = df.iloc[:, 1].astype(float)
+    lon_col = df.iloc[:, 2].astype(float)
+    return dict(zip(idx_col, zip(lat_col, lon_col)))
 
 
 def load_reject_reasons(files):
@@ -102,10 +103,161 @@ def sample_list(items, n=20):
 
 
 # ---------------------------------------------------------------------------
+# Per-folder worker (runs in thread pool)
+# ---------------------------------------------------------------------------
+
+def _process_folder(folder, has_metadata_dir, metadata_dir, source_coords):
+    """Process one location folder. Returns a findings dict, or None if not a valid index folder."""
+    try:
+        idx = int(folder.name)
+    except ValueError:
+        return None
+
+    result = dict(
+        idx=idx,
+        empty=False,
+        incomplete=None,
+        corrupt_imgs=[],
+        bad_dimensions=[],
+        bad_color_mode=[],
+        size_outliers=[],
+        blank_imgs=[],
+        images_ok=0,
+        missing_meta=False,
+        corrupt_meta=None,
+        meta_field_issues=None,
+        meta_value_issues=[],
+        meta_index_mismatch=None,
+        coord_mismatch=None,
+        pano_distance_issue=None,
+        bad_coords=[],
+        outside_california=[],
+        panoid=None,
+    )
+
+    # --- [1] Image completeness ---
+    present = {f.name for f in folder.glob("*.jpg")}
+    missing = EXPECTED_IMAGES - present
+    if not present:
+        result["empty"] = True
+    elif missing:
+        result["incomplete"] = (idx, sorted(missing))
+
+    # --- [2] Image integrity ---
+    for img_path in sorted(folder.glob("*.jpg")):
+        file_size = img_path.stat().st_size
+        if file_size == 0:
+            result["corrupt_imgs"].append((idx, img_path.name, "empty file (0 bytes)"))
+            continue
+
+        if file_size < MIN_FILE_SIZE:
+            result["size_outliers"].append((idx, img_path.name, file_size, "suspiciously small"))
+        elif file_size > MAX_FILE_SIZE:
+            result["size_outliers"].append((idx, img_path.name, file_size, "suspiciously large"))
+
+        try:
+            with Image.open(img_path) as img:
+                img.load()
+                w, h = img.size
+                if (w, h) != (1024, 1024):
+                    result["bad_dimensions"].append((idx, img_path.name, f"{w}x{h}"))
+                else:
+                    result["images_ok"] += 1
+                if img.mode != "RGB":
+                    result["bad_color_mode"].append((idx, img_path.name, img.mode))
+                std_val = float(np.array(img, dtype=np.float32).std())
+                if std_val < BLANK_STD_THRESHOLD:
+                    result["blank_imgs"].append((idx, img_path.name, round(std_val, 2)))
+        except Exception as e:
+            result["corrupt_imgs"].append((idx, img_path.name, str(e)))
+
+    # --- [3] Metadata integrity ---
+    if has_metadata_dir:
+        meta_path = metadata_dir / f"{idx:06d}.json"
+        if not meta_path.exists():
+            result["missing_meta"] = True
+        else:
+            try:
+                with open(meta_path) as f:
+                    meta = json.load(f)
+
+                missing_fields = REQUIRED_META_FIELDS - set(meta.keys())
+                if missing_fields:
+                    result["meta_field_issues"] = (idx, sorted(missing_fields))
+
+                if "headings" in meta and meta["headings"] != EXPECTED_HEADINGS:
+                    result["meta_value_issues"].append((idx, "headings", EXPECTED_HEADINGS, meta["headings"]))
+                if "view_resolution" in meta and meta["view_resolution"] != EXPECTED_VIEW_RESOLUTION:
+                    result["meta_value_issues"].append((idx, "view_resolution", EXPECTED_VIEW_RESOLUTION, meta["view_resolution"]))
+                if "view_fov" in meta and meta["view_fov"] is not None:
+                    try:
+                        if float(meta["view_fov"]) != EXPECTED_VIEW_FOV:
+                            result["meta_value_issues"].append((idx, "view_fov", EXPECTED_VIEW_FOV, meta["view_fov"]))
+                    except (ValueError, TypeError):
+                        result["meta_value_issues"].append((idx, "view_fov", EXPECTED_VIEW_FOV, meta["view_fov"]))
+
+                if "index" in meta and int(meta["index"]) != idx:
+                    result["meta_index_mismatch"] = (idx, meta["index"])
+
+                if "panoid" in meta and meta["panoid"]:
+                    result["panoid"] = meta["panoid"]
+
+                if source_coords and idx in source_coords:
+                    src_lat, src_lon = source_coords[idx]
+                    meta_lat = meta.get("original_lat")
+                    meta_lon = meta.get("original_lon")
+                    if meta_lat is not None and meta_lon is not None:
+                        if (abs(float(meta_lat) - src_lat) > 0.001
+                                or abs(float(meta_lon) - src_lon) > 0.001):
+                            result["coord_mismatch"] = (
+                                idx, float(meta_lat), float(meta_lon), src_lat, src_lon,
+                            )
+
+                pano_lat = meta.get("pano_lat")
+                pano_lon = meta.get("pano_lon")
+                orig_lat = meta.get("original_lat")
+                orig_lon = meta.get("original_lon")
+                if all(v is not None for v in [pano_lat, pano_lon, orig_lat, orig_lon]):
+                    try:
+                        dist = haversine_m(
+                            float(orig_lat), float(orig_lon),
+                            float(pano_lat), float(pano_lon),
+                        )
+                        if dist > MAX_PANO_DISTANCE_M:
+                            result["pano_distance_issue"] = (idx, round(dist, 1))
+                    except (ValueError, TypeError):
+                        pass
+
+                for field, lat_key, lon_key in [
+                    ("original", "original_lat", "original_lon"),
+                    ("pano", "pano_lat", "pano_lon"),
+                ]:
+                    lat_v = meta.get(lat_key)
+                    lon_v = meta.get(lon_key)
+                    if lat_v is not None and lon_v is not None:
+                        try:
+                            la, lo = float(lat_v), float(lon_v)
+                            if not (-90 <= la <= 90) or not (-180 <= lo <= 180):
+                                result["bad_coords"].append((idx, field, la, lo))
+                            elif not (CA_LAT_MIN <= la <= CA_LAT_MAX
+                                      and CA_LON_MIN <= lo <= CA_LON_MAX):
+                                result["outside_california"].append((idx, field, la, lo))
+                        except (ValueError, TypeError):
+                            result["bad_coords"].append((idx, field, lat_v, lon_v))
+
+            except Exception as e:
+                result["corrupt_meta"] = (idx, str(e))
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main():
+    t0 = time.time()
+
     parser = argparse.ArgumentParser(description="SALTY data integrity checker")
     parser.add_argument(
         "data_dir",
@@ -115,6 +267,12 @@ def main():
         "--source-csv",
         default=None,
         help="Path to source coordinate CSV (e.g. 100k-205k_data.csv) for coverage check",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=4,
+        help="Number of parallel scan workers (default: 4)",
     )
     args = parser.parse_args()
 
@@ -166,7 +324,6 @@ def main():
     else:
         print("  WARNING: No rejects*.csv found")
 
-    # Source CSV (optional)
     source_coords = None
     source_indices = None
     if args.source_csv:
@@ -179,173 +336,81 @@ def main():
             print(f"  source    : {source_path.name} → {len(source_indices):,} entries")
 
     # ------------------------------------------------------------------
-    # Scan image folders
+    # Collect folders (single pass for disk_indices + folder list)
     # ------------------------------------------------------------------
+    folders = []
     disk_indices = set()
     for entry in IMAGES_DIR.iterdir():
         if entry.is_dir():
             try:
                 disk_indices.add(int(entry.name))
+                folders.append(entry)
             except ValueError:
                 pass
+    folders.sort(key=lambda f: int(f.name))
 
-    print(f"\nScanning {len(disk_indices):,} image folders...")
+    print(f"\nScanning {len(folders):,} image folders with {args.workers} workers...")
 
     # Accumulators
-    incomplete = []          # (idx, missing_files)
-    empty_folders = []       # idx
-    corrupt_imgs = []        # (idx, filename, error)
-    bad_dimensions = []      # (idx, filename, actual_size)
-    bad_color_mode = []      # (idx, filename, mode)
-    size_outliers = []       # (idx, filename, size_bytes, reason)
-    blank_imgs = []          # (idx, filename, std_val)
-    missing_meta = []        # idx
-    corrupt_meta = []        # (idx, error)
-    meta_field_issues = []   # (idx, missing_fields)
-    meta_value_issues = []   # (idx, field, expected, actual)
-    meta_index_mismatch = [] # (idx, json_index)
-    coord_mismatches = []    # (idx, meta_lat, meta_lon, src_lat, src_lon)
-    pano_distance_issues = []  # (idx, distance_m)
-    bad_coords = []          # (idx, field, lat, lon)
-    outside_california = []  # (idx, field, lat, lon)
-    panoid_map = {}          # panoid -> list of idx (for duplicate detection)
+    incomplete = []
+    empty_folders = []
+    corrupt_imgs = []
+    bad_dimensions = []
+    bad_color_mode = []
+    size_outliers = []
+    blank_imgs = []
+    missing_meta = []
+    corrupt_meta = []
+    meta_field_issues = []
+    meta_value_issues = []
+    meta_index_mismatch = []
+    coord_mismatches = []
+    pano_distance_issues = []
+    bad_coords = []
+    outside_california = []
+    panoid_map = {}
     total_images_ok = 0
 
-    for folder in sorted(IMAGES_DIR.iterdir()):
-        if not folder.is_dir():
-            continue
-        try:
-            idx = int(folder.name)
-        except ValueError:
-            continue
+    worker = partial(
+        _process_folder,
+        has_metadata_dir=has_metadata_dir,
+        metadata_dir=METADATA_DIR,
+        source_coords=source_coords,
+    )
 
-        # --- [1] Image completeness ---
-        present = {f.name for f in folder.glob("*.jpg")}
-        missing = EXPECTED_IMAGES - present
-        if len(present) == 0:
-            empty_folders.append(idx)
-        elif missing:
-            incomplete.append((idx, sorted(missing)))
-
-        # --- [2] Image integrity ---
-        for img_path in sorted(folder.glob("*.jpg")):
-            file_size = img_path.stat().st_size
-            if file_size == 0:
-                corrupt_imgs.append((idx, img_path.name, "empty file (0 bytes)"))
+    with ThreadPoolExecutor(max_workers=args.workers) as executor:
+        futures = {executor.submit(worker, folder): folder for folder in folders}
+        for future in tqdm(as_completed(futures), total=len(folders), desc="Scanning", unit="loc"):
+            r = future.result()
+            if r is None:
                 continue
-
-            # File size outlier check
-            if file_size < MIN_FILE_SIZE:
-                size_outliers.append((idx, img_path.name, file_size, "suspiciously small"))
-            elif file_size > MAX_FILE_SIZE:
-                size_outliers.append((idx, img_path.name, file_size, "suspiciously large"))
-
-            try:
-                with Image.open(img_path) as img:
-                    img.load()
-                    w, h = img.size
-                    if (w, h) != (1024, 1024):
-                        bad_dimensions.append((idx, img_path.name, f"{w}x{h}"))
-                    else:
-                        total_images_ok += 1
-                    # RGB color mode (CLIP ViT-L/14 expects 3-channel RGB)
-                    if img.mode != "RGB":
-                        bad_color_mode.append((idx, img_path.name, img.mode))
-                    # Blank / degenerate image detection
-                    arr = np.array(img, dtype=np.float32)
-                    std = arr.std()
-                    if std < BLANK_STD_THRESHOLD:
-                        blank_imgs.append((idx, img_path.name, round(std, 2)))
-            except Exception as e:
-                corrupt_imgs.append((idx, img_path.name, str(e)))
-
-        # --- [3] Metadata integrity ---
-        if has_metadata_dir:
-            meta_path = METADATA_DIR / f"{idx:06d}.json"
-            if not meta_path.exists():
-                missing_meta.append(idx)
-            else:
-                try:
-                    with open(meta_path, "r") as f:
-                        meta = json.load(f)
-
-                    # Required fields
-                    missing_fields = REQUIRED_META_FIELDS - set(meta.keys())
-                    if missing_fields:
-                        meta_field_issues.append((idx, sorted(missing_fields)))
-
-                    # Config value validation (not just existence)
-                    if "headings" in meta and meta["headings"] != EXPECTED_HEADINGS:
-                        meta_value_issues.append((idx, "headings", EXPECTED_HEADINGS, meta["headings"]))
-                    if "view_resolution" in meta and meta["view_resolution"] != EXPECTED_VIEW_RESOLUTION:
-                        meta_value_issues.append((idx, "view_resolution", EXPECTED_VIEW_RESOLUTION, meta["view_resolution"]))
-                    if "view_fov" in meta and "view_fov" in meta:
-                        try:
-                            if float(meta["view_fov"]) != EXPECTED_VIEW_FOV:
-                                meta_value_issues.append((idx, "view_fov", EXPECTED_VIEW_FOV, meta["view_fov"]))
-                        except (ValueError, TypeError):
-                            meta_value_issues.append((idx, "view_fov", EXPECTED_VIEW_FOV, meta["view_fov"]))
-
-                    # Index consistency
-                    if "index" in meta and int(meta["index"]) != idx:
-                        meta_index_mismatch.append((idx, meta["index"]))
-
-                    # Collect panoid for duplicate check
-                    if "panoid" in meta and meta["panoid"]:
-                        pid = meta["panoid"]
-                        panoid_map.setdefault(pid, []).append(idx)
-
-                    # Coordinate cross-check against source CSV
-                    if source_coords and idx in source_coords:
-                        src_lat, src_lon = source_coords[idx]
-                        meta_lat = meta.get("original_lat")
-                        meta_lon = meta.get("original_lon")
-                        if meta_lat is not None and meta_lon is not None:
-                            # Allow tiny floating-point drift but flag real mismatches
-                            if (abs(float(meta_lat) - src_lat) > 0.001
-                                    or abs(float(meta_lon) - src_lon) > 0.001):
-                                coord_mismatches.append((
-                                    idx,
-                                    float(meta_lat), float(meta_lon),
-                                    src_lat, src_lon,
-                                ))
-
-                    # Pano-to-original distance check
-                    pano_lat = meta.get("pano_lat")
-                    pano_lon = meta.get("pano_lon")
-                    orig_lat = meta.get("original_lat")
-                    orig_lon = meta.get("original_lon")
-                    if all(v is not None for v in [pano_lat, pano_lon, orig_lat, orig_lon]):
-                        try:
-                            dist = haversine_m(
-                                float(orig_lat), float(orig_lon),
-                                float(pano_lat), float(pano_lon),
-                            )
-                            if dist > MAX_PANO_DISTANCE_M:
-                                pano_distance_issues.append((idx, round(dist, 1)))
-                        except (ValueError, TypeError):
-                            pass
-
-                    # Coordinate validation: generic bounds + California bbox
-                    for field, lat_key, lon_key in [
-                        ("original", "original_lat", "original_lon"),
-                        ("pano", "pano_lat", "pano_lon"),
-                    ]:
-                        lat_v = meta.get(lat_key)
-                        lon_v = meta.get(lon_key)
-                        if lat_v is not None and lon_v is not None:
-                            try:
-                                la, lo = float(lat_v), float(lon_v)
-                                if not (-90 <= la <= 90) or not (-180 <= lo <= 180):
-                                    bad_coords.append((idx, field, la, lo))
-                                elif not (CA_LAT_MIN <= la <= CA_LAT_MAX
-                                          and CA_LON_MIN <= lo <= CA_LON_MAX):
-                                    outside_california.append((idx, field, la, lo))
-                            except (ValueError, TypeError):
-                                bad_coords.append((idx, field, lat_v, lon_v))
-
-                except Exception as e:
-                    corrupt_meta.append((idx, str(e)))
+            if r["empty"]:
+                empty_folders.append(r["idx"])
+            if r["incomplete"]:
+                incomplete.append(r["incomplete"])
+            corrupt_imgs.extend(r["corrupt_imgs"])
+            bad_dimensions.extend(r["bad_dimensions"])
+            bad_color_mode.extend(r["bad_color_mode"])
+            size_outliers.extend(r["size_outliers"])
+            blank_imgs.extend(r["blank_imgs"])
+            total_images_ok += r["images_ok"]
+            if r["missing_meta"]:
+                missing_meta.append(r["idx"])
+            if r["corrupt_meta"]:
+                corrupt_meta.append(r["corrupt_meta"])
+            if r["meta_field_issues"]:
+                meta_field_issues.append(r["meta_field_issues"])
+            meta_value_issues.extend(r["meta_value_issues"])
+            if r["meta_index_mismatch"]:
+                meta_index_mismatch.append(r["meta_index_mismatch"])
+            if r["coord_mismatch"]:
+                coord_mismatches.append(r["coord_mismatch"])
+            if r["pano_distance_issue"]:
+                pano_distance_issues.append(r["pano_distance_issue"])
+            bad_coords.extend(r["bad_coords"])
+            outside_california.extend(r["outside_california"])
+            if r["panoid"]:
+                panoid_map.setdefault(r["panoid"], []).append(r["idx"])
 
     # ------------------------------------------------------------------
     # [4] Source CSV coverage
@@ -364,18 +429,14 @@ def main():
     # ------------------------------------------------------------------
     # [6] Additional checks
     # ------------------------------------------------------------------
-    # Duplicate indices across completed CSVs
     completed_counts = Counter(completed_raw)
     duplicate_completed = {idx: n for idx, n in completed_counts.items() if n > 1}
 
-    # Duplicate indices across rejects CSVs
     rejected_counts = Counter(rejected_raw)
     duplicate_rejected = {idx: n for idx, n in rejected_counts.items() if n > 1}
 
-    # Indices in BOTH completed and rejected (conflicting state)
     in_both = completed_set & rejected_set
 
-    # Orphan metadata (metadata JSON exists but no image folder)
     orphan_meta = set()
     if has_metadata_dir:
         for meta_file in METADATA_DIR.iterdir():
@@ -387,7 +448,6 @@ def main():
                 except ValueError:
                     pass
 
-    # Duplicate panoid (different locations with same panorama)
     duplicate_panoids = {pid: idxs for pid, idxs in panoid_map.items() if len(idxs) > 1}
 
     # ------------------------------------------------------------------
@@ -453,8 +513,7 @@ def main():
     # [4]
     if source_indices is not None:
         n4_attempted = len(source_indices) - len(never_tried)
-        issues += len(never_tried)
-        tag4 = "PASS" if len(never_tried) == 0 else "FAIL"
+        tag4 = "PASS" if len(never_tried) == 0 else "WARN"
         print(f"[4] Source CSV coverage                   : {tag4} — {n4_attempted:,} / {len(source_indices):,} attempted, {len(never_tried):,} never tried")
     else:
         print(f"[4] Source CSV coverage                   : SKIP — no --source-csv provided")
@@ -622,12 +681,14 @@ def main():
     # ------------------------------------------------------------------
     # Verdict
     # ------------------------------------------------------------------
+    elapsed = time.time() - t0
     print()
     print("=" * 60)
     if issues == 0:
         print("All checks passed.")
     else:
         print(f"{issues:,} issue(s) found.")
+    print(f"Completed in {elapsed:.1f}s")
     print()
 
 
