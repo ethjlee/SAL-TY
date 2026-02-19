@@ -26,3 +26,8 @@ debug_*.py
 
 # Stuff
 .DS_Store
+
+# Archives
+*.tar 
+*.zip 
+*.rar 
