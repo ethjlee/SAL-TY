@@ -10,7 +10,10 @@ Usage:
 """
 
 import argparse
+import hashlib
+import io
 import json
+import re
 import sys
 import time
 from collections import Counter
@@ -37,6 +40,9 @@ MAX_FILE_SIZE = 2_000_000   # 2 MB — anything above this is suspicious
 
 # Blank image detection: flag if per-channel std deviation is below this
 BLANK_STD_THRESHOLD = 5.0   # pixel values 0-255; uniform images ≈ 0
+
+# Blur detection: Laplacian variance of grayscale — high = sharp, low = blurry
+BLUR_THRESHOLD = 10.0       # zoom 3 / Q90 street-view typically scores >30; <10 is visibly blurry
 
 # Pano-to-original distance: flag if panorama is farther than this from request
 MAX_PANO_DISTANCE_M = 500   # meters
@@ -75,6 +81,21 @@ def load_csv_indices(files):
     return set(raw), raw
 
 
+def load_completed_panoids(files):
+    """Load {index: panoid} from completed CSVs. Used for CSV↔metadata cross-check."""
+    result = {}
+    for f in files:
+        try:
+            df = pd.read_csv(f)
+            if "panoid" in df.columns and "index" in df.columns:
+                sub = df[["index", "panoid"]].dropna(subset=["panoid"])
+                sub = sub.astype({"index": int, "panoid": str})
+                result.update(zip(sub["index"], sub["panoid"]))
+        except Exception as e:
+            print(f"  WARNING: Could not read panoids from {f.name}: {e}")
+    return result
+
+
 def load_source_coords(source_path):
     """Load source CSV and return {index: (lat, lon)} dict."""
     df = pd.read_csv(source_path)
@@ -97,16 +118,196 @@ def load_reject_reasons(files):
     return reasons
 
 
-def sample_list(items, n=20):
-    """Return sorted first-n items for display."""
-    return sorted(items)[:n]
+def _detail_block(header, items, formatter, n=20):
+    """Return a list of lines for a details block, or [] if items is empty."""
+    if not items:
+        return []
+    lst = list(items)
+    total = len(lst)
+    lines = ["", f"{header} (first {n} of {total:,}):"]
+    for item in lst[:n]:
+        lines.append("  " + formatter(item))
+    return lines
 
 
 # ---------------------------------------------------------------------------
-# Per-folder worker (runs in thread pool)
+# Per-folder worker — image and metadata sub-checks
 # ---------------------------------------------------------------------------
 
-def _process_folder(folder, has_metadata_dir, metadata_dir, source_coords):
+def _check_images(folder, idx, result):
+    """Check all images in a location folder. Mutates result in place."""
+    present = {f.name for f in folder.glob("*.jpg")}
+    missing = EXPECTED_IMAGES - present
+    if not present:
+        result["empty"] = True
+    elif missing:
+        result["incomplete"] = (idx, sorted(missing))
+
+    for f in folder.iterdir():
+        if f.is_file() and f.suffix.lower() != ".jpg":
+            result["unexpected_files"].append((idx, f.name))
+
+    view_hashes = {}
+    for img_path in sorted(folder.glob("*.jpg")):
+        try:
+            raw = img_path.read_bytes()
+        except Exception as e:
+            result["corrupt_imgs"].append((idx, img_path.name, f"cannot read: {e}"))
+            continue
+
+        file_size = len(raw)
+        result["disk_bytes"] += file_size
+
+        if file_size == 0:
+            result["corrupt_imgs"].append((idx, img_path.name, "empty file (0 bytes)"))
+            continue
+
+        if file_size < MIN_FILE_SIZE:
+            result["size_outliers"].append((idx, img_path.name, file_size, "suspiciously small"))
+        elif file_size > MAX_FILE_SIZE:
+            result["size_outliers"].append((idx, img_path.name, file_size, "suspiciously large"))
+
+        # Truncated JPEG: valid JPEGs end with FFD9
+        if raw[-2:] != b"\xff\xd9":
+            result["truncated_imgs"].append((idx, img_path.name))
+
+        # Duplicate view detection: hash file content
+        file_hash = hashlib.md5(raw).hexdigest()
+        if file_hash in view_hashes:
+            result["duplicate_views"].append((idx, img_path.name, view_hashes[file_hash]))
+        else:
+            view_hashes[file_hash] = img_path.name
+
+        # PIL validation
+        try:
+            with Image.open(io.BytesIO(raw)) as img:
+                img.load()
+                w, h = img.size
+                if (w, h) != (1024, 1024):
+                    result["bad_dimensions"].append((idx, img_path.name, f"{w}x{h}"))
+                else:
+                    result["images_ok"] += 1
+                if img.mode != "RGB":
+                    result["bad_color_mode"].append((idx, img_path.name, img.mode))
+                std_val = float(np.array(img, dtype=np.float32).std())
+                if std_val < BLANK_STD_THRESHOLD:
+                    result["blank_imgs"].append((idx, img_path.name, round(std_val, 2)))
+                # Blur detection: Laplacian variance on grayscale
+                gray = np.array(img.convert("L"), dtype=np.float32)
+                laplacian = (
+                    gray[:-2, 1:-1] + gray[2:, 1:-1]
+                    + gray[1:-1, :-2] + gray[1:-1, 2:]
+                    - 4 * gray[1:-1, 1:-1]
+                )
+                blur_score = float(laplacian.var())
+                if blur_score < BLUR_THRESHOLD:
+                    result["blurry_imgs"].append((idx, img_path.name, round(blur_score, 2)))
+        except Exception as e:
+            result["corrupt_imgs"].append((idx, img_path.name, str(e)))
+
+
+def _check_metadata(meta_path, idx, source_coords, completed_panoids, result):
+    """Check one metadata JSON file. Mutates result in place."""
+    if not meta_path.exists():
+        result["missing_meta"] = True
+        return
+
+    try:
+        meta_raw = meta_path.read_bytes()
+        result["disk_bytes"] += len(meta_raw)
+        meta = json.loads(meta_raw)
+
+        missing_fields = REQUIRED_META_FIELDS - set(meta.keys())
+        if missing_fields:
+            result["meta_field_issues"] = (idx, sorted(missing_fields))
+
+        if "headings" in meta and meta["headings"] != EXPECTED_HEADINGS:
+            result["meta_value_issues"].append((idx, "headings", EXPECTED_HEADINGS, meta["headings"]))
+        if "view_resolution" in meta and meta["view_resolution"] != EXPECTED_VIEW_RESOLUTION:
+            result["meta_value_issues"].append((idx, "view_resolution", EXPECTED_VIEW_RESOLUTION, meta["view_resolution"]))
+        if "view_fov" in meta and meta["view_fov"] is not None:
+            try:
+                if float(meta["view_fov"]) != EXPECTED_VIEW_FOV:
+                    result["meta_value_issues"].append((idx, "view_fov", EXPECTED_VIEW_FOV, meta["view_fov"]))
+            except (ValueError, TypeError):
+                result["meta_value_issues"].append((idx, "view_fov", EXPECTED_VIEW_FOV, meta["view_fov"]))
+
+        if "index" in meta and int(meta["index"]) != idx:
+            result["meta_index_mismatch"] = (idx, meta["index"])
+
+        if "panoid" in meta and meta["panoid"]:
+            result["panoid"] = meta["panoid"]
+
+        # Copyright check — must contain "Google" to confirm official panorama
+        copyright_val = meta.get("copyright", "")
+        if not copyright_val or "Google" not in str(copyright_val):
+            result["copyright_issues"].append((idx, str(copyright_val)))
+
+        # Country code — all California data must be US
+        country_code = meta.get("country_code", "")
+        if country_code and country_code != "US":
+            result["country_code_issues"].append((idx, country_code))
+
+        # Capture date format — must be YYYY-MM if present
+        date_val = meta.get("date", "")
+        if date_val and not re.match(r"^\d{4}-\d{2}$", str(date_val)):
+            result["bad_dates"].append((idx, str(date_val)))
+
+        # Panoid cross-check: completed CSV recorded panoid vs metadata panoid
+        if completed_panoids and idx in completed_panoids:
+            csv_panoid = completed_panoids[idx]
+            meta_panoid = meta.get("panoid", "")
+            if csv_panoid and meta_panoid and csv_panoid != meta_panoid:
+                result["panoid_csv_mismatches"].append((idx, csv_panoid, meta_panoid))
+
+        if source_coords and idx in source_coords:
+            src_lat, src_lon = source_coords[idx]
+            meta_lat = meta.get("original_lat")
+            meta_lon = meta.get("original_lon")
+            if meta_lat is not None and meta_lon is not None:
+                if (abs(float(meta_lat) - src_lat) > 0.001
+                        or abs(float(meta_lon) - src_lon) > 0.001):
+                    result["coord_mismatch"] = (
+                        idx, float(meta_lat), float(meta_lon), src_lat, src_lon,
+                    )
+
+        pano_lat = meta.get("pano_lat")
+        pano_lon = meta.get("pano_lon")
+        orig_lat = meta.get("original_lat")
+        orig_lon = meta.get("original_lon")
+        if all(v is not None for v in [pano_lat, pano_lon, orig_lat, orig_lon]):
+            try:
+                dist = haversine_m(
+                    float(orig_lat), float(orig_lon),
+                    float(pano_lat), float(pano_lon),
+                )
+                if dist > MAX_PANO_DISTANCE_M:
+                    result["pano_distance_issue"] = (idx, round(dist, 1))
+            except (ValueError, TypeError):
+                pass
+
+        for field, lat_key, lon_key in [
+            ("original", "original_lat", "original_lon"),
+            ("pano", "pano_lat", "pano_lon"),
+        ]:
+            lat_v = meta.get(lat_key)
+            lon_v = meta.get(lon_key)
+            if lat_v is not None and lon_v is not None:
+                try:
+                    la, lo = float(lat_v), float(lon_v)
+                    if not (-90 <= la <= 90) or not (-180 <= lo <= 180):
+                        result["bad_coords"].append((idx, field, la, lo))
+                    elif not (CA_LAT_MIN <= la <= CA_LAT_MAX
+                              and CA_LON_MIN <= lo <= CA_LON_MAX):
+                        result["outside_california"].append((idx, field, la, lo))
+                except (ValueError, TypeError):
+                    result["bad_coords"].append((idx, field, lat_v, lon_v))
+
+    except Exception as e:
+        result["corrupt_meta"] = (idx, str(e))
+
+
+def _process_folder(folder, has_metadata_dir, metadata_dir, source_coords, completed_panoids):
     """Process one location folder. Returns a findings dict, or None if not a valid index folder."""
     try:
         idx = int(folder.name)
@@ -122,7 +323,12 @@ def _process_folder(folder, has_metadata_dir, metadata_dir, source_coords):
         bad_color_mode=[],
         size_outliers=[],
         blank_imgs=[],
+        blurry_imgs=[],
+        truncated_imgs=[],
+        duplicate_views=[],
+        unexpected_files=[],
         images_ok=0,
+        disk_bytes=0,
         missing_meta=False,
         corrupt_meta=None,
         meta_field_issues=None,
@@ -133,120 +339,17 @@ def _process_folder(folder, has_metadata_dir, metadata_dir, source_coords):
         bad_coords=[],
         outside_california=[],
         panoid=None,
+        copyright_issues=[],
+        country_code_issues=[],
+        bad_dates=[],
+        panoid_csv_mismatches=[],
     )
 
-    # --- [1] Image completeness ---
-    present = {f.name for f in folder.glob("*.jpg")}
-    missing = EXPECTED_IMAGES - present
-    if not present:
-        result["empty"] = True
-    elif missing:
-        result["incomplete"] = (idx, sorted(missing))
+    _check_images(folder, idx, result)
 
-    # --- [2] Image integrity ---
-    for img_path in sorted(folder.glob("*.jpg")):
-        file_size = img_path.stat().st_size
-        if file_size == 0:
-            result["corrupt_imgs"].append((idx, img_path.name, "empty file (0 bytes)"))
-            continue
-
-        if file_size < MIN_FILE_SIZE:
-            result["size_outliers"].append((idx, img_path.name, file_size, "suspiciously small"))
-        elif file_size > MAX_FILE_SIZE:
-            result["size_outliers"].append((idx, img_path.name, file_size, "suspiciously large"))
-
-        try:
-            with Image.open(img_path) as img:
-                img.load()
-                w, h = img.size
-                if (w, h) != (1024, 1024):
-                    result["bad_dimensions"].append((idx, img_path.name, f"{w}x{h}"))
-                else:
-                    result["images_ok"] += 1
-                if img.mode != "RGB":
-                    result["bad_color_mode"].append((idx, img_path.name, img.mode))
-                std_val = float(np.array(img, dtype=np.float32).std())
-                if std_val < BLANK_STD_THRESHOLD:
-                    result["blank_imgs"].append((idx, img_path.name, round(std_val, 2)))
-        except Exception as e:
-            result["corrupt_imgs"].append((idx, img_path.name, str(e)))
-
-    # --- [3] Metadata integrity ---
     if has_metadata_dir:
         meta_path = metadata_dir / f"{idx:06d}.json"
-        if not meta_path.exists():
-            result["missing_meta"] = True
-        else:
-            try:
-                with open(meta_path) as f:
-                    meta = json.load(f)
-
-                missing_fields = REQUIRED_META_FIELDS - set(meta.keys())
-                if missing_fields:
-                    result["meta_field_issues"] = (idx, sorted(missing_fields))
-
-                if "headings" in meta and meta["headings"] != EXPECTED_HEADINGS:
-                    result["meta_value_issues"].append((idx, "headings", EXPECTED_HEADINGS, meta["headings"]))
-                if "view_resolution" in meta and meta["view_resolution"] != EXPECTED_VIEW_RESOLUTION:
-                    result["meta_value_issues"].append((idx, "view_resolution", EXPECTED_VIEW_RESOLUTION, meta["view_resolution"]))
-                if "view_fov" in meta and meta["view_fov"] is not None:
-                    try:
-                        if float(meta["view_fov"]) != EXPECTED_VIEW_FOV:
-                            result["meta_value_issues"].append((idx, "view_fov", EXPECTED_VIEW_FOV, meta["view_fov"]))
-                    except (ValueError, TypeError):
-                        result["meta_value_issues"].append((idx, "view_fov", EXPECTED_VIEW_FOV, meta["view_fov"]))
-
-                if "index" in meta and int(meta["index"]) != idx:
-                    result["meta_index_mismatch"] = (idx, meta["index"])
-
-                if "panoid" in meta and meta["panoid"]:
-                    result["panoid"] = meta["panoid"]
-
-                if source_coords and idx in source_coords:
-                    src_lat, src_lon = source_coords[idx]
-                    meta_lat = meta.get("original_lat")
-                    meta_lon = meta.get("original_lon")
-                    if meta_lat is not None and meta_lon is not None:
-                        if (abs(float(meta_lat) - src_lat) > 0.001
-                                or abs(float(meta_lon) - src_lon) > 0.001):
-                            result["coord_mismatch"] = (
-                                idx, float(meta_lat), float(meta_lon), src_lat, src_lon,
-                            )
-
-                pano_lat = meta.get("pano_lat")
-                pano_lon = meta.get("pano_lon")
-                orig_lat = meta.get("original_lat")
-                orig_lon = meta.get("original_lon")
-                if all(v is not None for v in [pano_lat, pano_lon, orig_lat, orig_lon]):
-                    try:
-                        dist = haversine_m(
-                            float(orig_lat), float(orig_lon),
-                            float(pano_lat), float(pano_lon),
-                        )
-                        if dist > MAX_PANO_DISTANCE_M:
-                            result["pano_distance_issue"] = (idx, round(dist, 1))
-                    except (ValueError, TypeError):
-                        pass
-
-                for field, lat_key, lon_key in [
-                    ("original", "original_lat", "original_lon"),
-                    ("pano", "pano_lat", "pano_lon"),
-                ]:
-                    lat_v = meta.get(lat_key)
-                    lon_v = meta.get(lon_key)
-                    if lat_v is not None and lon_v is not None:
-                        try:
-                            la, lo = float(lat_v), float(lon_v)
-                            if not (-90 <= la <= 90) or not (-180 <= lo <= 180):
-                                result["bad_coords"].append((idx, field, la, lo))
-                            elif not (CA_LAT_MIN <= la <= CA_LAT_MAX
-                                      and CA_LON_MIN <= lo <= CA_LON_MAX):
-                                result["outside_california"].append((idx, field, la, lo))
-                        except (ValueError, TypeError):
-                            result["bad_coords"].append((idx, field, lat_v, lon_v))
-
-            except Exception as e:
-                result["corrupt_meta"] = (idx, str(e))
+        _check_metadata(meta_path, idx, source_coords, completed_panoids, result)
 
     return result
 
@@ -305,8 +408,10 @@ def main():
     rejected_files = sorted(SALTY_DATA.glob("rejects*.csv"))
 
     completed_set, completed_raw = set(), []
+    completed_panoids = {}
     if completed_files:
         completed_set, completed_raw = load_csv_indices(completed_files)
+        completed_panoids = load_completed_panoids(completed_files)
         names = ", ".join(f.name for f in completed_files)
         print(f"  completed : {names}")
         print(f"            → {len(completed_set):,} unique entries")
@@ -359,6 +464,10 @@ def main():
     bad_color_mode = []
     size_outliers = []
     blank_imgs = []
+    blurry_imgs = []
+    truncated_imgs = []
+    duplicate_views = []
+    unexpected_files = []
     missing_meta = []
     corrupt_meta = []
     meta_field_issues = []
@@ -370,18 +479,29 @@ def main():
     outside_california = []
     panoid_map = {}
     total_images_ok = 0
+    total_disk_bytes = 0
+    copyright_issues = []
+    country_code_issues = []
+    bad_dates = []
+    panoid_csv_mismatches = []
 
     worker = partial(
         _process_folder,
         has_metadata_dir=has_metadata_dir,
         metadata_dir=METADATA_DIR,
         source_coords=source_coords,
+        completed_panoids=completed_panoids,
     )
 
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         futures = {executor.submit(worker, folder): folder for folder in folders}
         for future in tqdm(as_completed(futures), total=len(folders), desc="Scanning", unit="loc"):
-            r = future.result()
+            try:
+                r = future.result()
+            except Exception as e:
+                folder = futures[future]
+                tqdm.write(f"WARNING: Error processing folder {folder.name}: {e}")
+                continue
             if r is None:
                 continue
             if r["empty"]:
@@ -393,7 +513,12 @@ def main():
             bad_color_mode.extend(r["bad_color_mode"])
             size_outliers.extend(r["size_outliers"])
             blank_imgs.extend(r["blank_imgs"])
+            blurry_imgs.extend(r["blurry_imgs"])
+            truncated_imgs.extend(r["truncated_imgs"])
+            duplicate_views.extend(r["duplicate_views"])
+            unexpected_files.extend(r["unexpected_files"])
             total_images_ok += r["images_ok"]
+            total_disk_bytes += r["disk_bytes"]
             if r["missing_meta"]:
                 missing_meta.append(r["idx"])
             if r["corrupt_meta"]:
@@ -411,6 +536,10 @@ def main():
             outside_california.extend(r["outside_california"])
             if r["panoid"]:
                 panoid_map.setdefault(r["panoid"], []).append(r["idx"])
+            copyright_issues.extend(r["copyright_issues"])
+            country_code_issues.extend(r["country_code_issues"])
+            bad_dates.extend(r["bad_dates"])
+            panoid_csv_mismatches.extend(r["panoid_csv_mismatches"])
 
     # ------------------------------------------------------------------
     # [4] Source CSV coverage
@@ -457,6 +586,11 @@ def main():
     print("Results")
     print("=" * 60)
 
+    # Dataset summary
+    disk_gb = total_disk_bytes / (1024 ** 3)
+    print(f"Dataset: {len(disk_indices):,} locations, {total_images_ok:,} valid images, {disk_gb:.1f} GB on disk | {len(rejected_set):,} rejected")
+    print()
+
     issues = 0
 
     # [1]
@@ -470,16 +604,21 @@ def main():
     print(f"[1] Image completeness (4 per folder)    : {tag1} — {parts1}")
 
     # [2]
-    n2_bad = len(corrupt_imgs) + len(bad_dimensions) + len(bad_color_mode) + len(blank_imgs)
+    n2_bad = (len(corrupt_imgs) + len(bad_dimensions) + len(bad_color_mode)
+              + len(blank_imgs) + len(blurry_imgs) + len(truncated_imgs) + len(duplicate_views))
     issues += n2_bad
     tag2 = "PASS" if n2_bad == 0 else "FAIL"
     parts2 = f"{total_images_ok:,} OK / {len(corrupt_imgs):,} corrupt / {len(bad_dimensions):,} wrong size"
+    if truncated_imgs:
+        parts2 += f" / {len(truncated_imgs):,} truncated"
+    if duplicate_views:
+        parts2 += f" / {len(duplicate_views):,} duplicate views"
     if bad_color_mode:
         parts2 += f" / {len(bad_color_mode):,} non-RGB"
     if blank_imgs:
         parts2 += f" / {len(blank_imgs):,} blank/degenerate"
-    if size_outliers:
-        parts2 += f" / {len(size_outliers):,} size outliers"
+    if blurry_imgs:
+        parts2 += f" / {len(blurry_imgs):,} blurry"
     print(f"[2] Image integrity (readable, 1024x1024): {tag2} — {parts2}")
 
     # [3]
@@ -487,7 +626,9 @@ def main():
         n3_bad = (len(missing_meta) + len(corrupt_meta) + len(meta_field_issues)
                   + len(meta_value_issues) + len(meta_index_mismatch)
                   + len(coord_mismatches) + len(pano_distance_issues)
-                  + len(bad_coords) + len(outside_california))
+                  + len(bad_coords) + len(outside_california)
+                  + len(copyright_issues) + len(country_code_issues)
+                  + len(bad_dates) + len(panoid_csv_mismatches))
         issues += n3_bad
         n3_ok = len(disk_indices) - len(missing_meta) - len(corrupt_meta)
         tag3 = "PASS" if n3_bad == 0 else "FAIL"
@@ -506,6 +647,14 @@ def main():
             parts3 += f" / {len(bad_coords):,} out-of-bounds coords"
         if outside_california:
             parts3 += f" / {len(outside_california):,} outside California"
+        if copyright_issues:
+            parts3 += f" / {len(copyright_issues):,} non-Google copyright"
+        if country_code_issues:
+            parts3 += f" / {len(country_code_issues):,} wrong country"
+        if bad_dates:
+            parts3 += f" / {len(bad_dates):,} bad date format"
+        if panoid_csv_mismatches:
+            parts3 += f" / {len(panoid_csv_mismatches):,} panoid CSV↔JSON mismatch"
         print(f"[3] Metadata integrity                   : {tag3} — {parts3}")
     else:
         print(f"[3] Metadata integrity                   : SKIP — metadata/ not found")
@@ -519,7 +668,7 @@ def main():
         print(f"[4] Source CSV coverage                   : SKIP — no --source-csv provided")
 
     # [5]
-    n5_bad = len(folders_not_in_completed)
+    n5_bad = len(folders_not_in_completed) + len(completed_without_folder)
     issues += n5_bad
     tag5 = "PASS" if n5_bad == 0 else "FAIL"
     print(f"[5] Completed <-> images match            : {tag5} — {len(folders_not_in_completed):,} folders not in completed / {len(completed_without_folder):,} completed without folder")
@@ -534,6 +683,10 @@ def main():
     print(f"    Duplicate panoid (same pano, diff loc): {len(duplicate_panoids):,}")
     if has_metadata_dir:
         print(f"    Orphan metadata (no image folder)     : {len(orphan_meta):,}")
+    if unexpected_files:
+        print(f"    Unexpected files in image folders     : {len(unexpected_files):,}")
+    if size_outliers:
+        print(f"    File size outliers (WARN)             : {len(size_outliers):,}")
     if reject_reasons:
         print(f"    Reject reason breakdown:")
         for reason, count in reject_reasons.most_common():
@@ -544,132 +697,161 @@ def main():
     # ------------------------------------------------------------------
     details = []
 
-    if empty_folders:
-        lines = ["", f"Empty folders — 0 images (first 20 of {len(empty_folders):,}):"]
-        for idx in sample_list(empty_folders)[:20]:
-            lines.append(f"  {idx:06d}/")
-        details.extend(lines)
-
-    if incomplete:
-        lines = ["", f"Incomplete folders (first 20 of {len(incomplete):,}):"]
-        for idx, missing in sample_list(incomplete)[:20]:
-            lines.append(f"  {idx:06d}  missing: {missing}")
-        details.extend(lines)
-
-    if corrupt_imgs:
-        lines = ["", f"Corrupt images (first 20 of {len(corrupt_imgs):,}):"]
-        for idx, fname, err in corrupt_imgs[:20]:
-            lines.append(f"  {idx:06d}/{fname}  {err}")
-        details.extend(lines)
-
-    if bad_dimensions:
-        lines = ["", f"Wrong dimensions (first 20 of {len(bad_dimensions):,}):"]
-        for idx, fname, dims in bad_dimensions[:20]:
-            lines.append(f"  {idx:06d}/{fname}  {dims} (expected 1024x1024)")
-        details.extend(lines)
-
-    if size_outliers:
-        lines = ["", f"File size outliers (first 20 of {len(size_outliers):,}):"]
-        for idx, fname, sz, reason in size_outliers[:20]:
-            lines.append(f"  {idx:06d}/{fname}  {sz:,} bytes — {reason}")
-        details.extend(lines)
-
-    if bad_color_mode:
-        lines = ["", f"Non-RGB images (first 20 of {len(bad_color_mode):,}):"]
-        for idx, fname, mode in bad_color_mode[:20]:
-            lines.append(f"  {idx:06d}/{fname}  mode={mode} (expected RGB)")
-        details.extend(lines)
-
-    if blank_imgs:
-        lines = ["", f"Blank/degenerate images — std < {BLANK_STD_THRESHOLD} (first 20 of {len(blank_imgs):,}):"]
-        for idx, fname, std_val in blank_imgs[:20]:
-            lines.append(f"  {idx:06d}/{fname}  std={std_val}")
-        details.extend(lines)
-
-    if missing_meta:
-        lines = ["", f"Missing metadata (first 20 of {len(missing_meta):,}):"]
-        for idx in sample_list(missing_meta)[:20]:
-            lines.append(f"  {idx:06d}.json")
-        details.extend(lines)
-
-    if corrupt_meta:
-        lines = ["", f"Corrupt metadata (first 20 of {len(corrupt_meta):,}):"]
-        for idx, err in corrupt_meta[:20]:
-            lines.append(f"  {idx:06d}.json  {err}")
-        details.extend(lines)
-
-    if meta_field_issues:
-        lines = ["", f"Metadata missing required fields (first 20 of {len(meta_field_issues):,}):"]
-        for idx, fields in meta_field_issues[:20]:
-            lines.append(f"  {idx:06d}.json  missing: {fields}")
-        details.extend(lines)
-
-    if meta_value_issues:
-        lines = ["", f"Metadata wrong config values (first 20 of {len(meta_value_issues):,}):"]
-        for idx, field, expected, actual in meta_value_issues[:20]:
-            lines.append(f"  {idx:06d}.json  {field}: expected {expected}, got {actual}")
-        details.extend(lines)
-
-    if meta_index_mismatch:
-        lines = ["", f"Metadata index mismatch (first 20 of {len(meta_index_mismatch):,}):"]
-        for idx, json_idx in meta_index_mismatch[:20]:
-            lines.append(f"  folder {idx:06d} but JSON has index={json_idx}")
-        details.extend(lines)
-
-    if coord_mismatches:
-        lines = ["", f"Coordinate mismatch: metadata vs source CSV (first 20 of {len(coord_mismatches):,}):"]
-        for idx, mlat, mlon, slat, slon in coord_mismatches[:20]:
-            lines.append(f"  {idx:06d}  meta=({mlat:.6f}, {mlon:.6f})  source=({slat:.6f}, {slon:.6f})")
-        details.extend(lines)
-
-    if pano_distance_issues:
-        lines = ["", f"Panorama too far from original location (>{MAX_PANO_DISTANCE_M}m, first 20 of {len(pano_distance_issues):,}):"]
-        for idx, dist in sorted(pano_distance_issues, key=lambda x: -x[1])[:20]:
-            lines.append(f"  {idx:06d}  {dist:,.0f}m away")
-        details.extend(lines)
-
-    if bad_coords:
-        lines = ["", f"Out-of-bounds coordinates (first 20 of {len(bad_coords):,}):"]
-        for idx, field, la, lo in bad_coords[:20]:
-            lines.append(f"  {idx:06d}  {field}: lat={la}, lon={lo}")
-        details.extend(lines)
-
-    if outside_california:
-        lines = ["", f"Coordinates outside California bbox (first 20 of {len(outside_california):,}):"]
-        for idx, field, la, lo in outside_california[:20]:
-            lines.append(f"  {idx:06d}  {field}: ({la:.6f}, {lo:.6f})")
-        details.extend(lines)
-
-    if duplicate_panoids:
-        lines = ["", f"Duplicate panoids — same panorama used by multiple locations (first 20 of {len(duplicate_panoids):,}):"]
-        for pid in sample_list(duplicate_panoids)[:20]:
-            idxs = duplicate_panoids[pid]
-            lines.append(f"  {pid}  → indices {idxs[:5]}{'...' if len(idxs) > 5 else ''}")
-        details.extend(lines)
-
-    if never_tried:
-        lines = ["", f"Never attempted indices (first 20 of {len(never_tried):,}):"]
-        for idx in sample_list(never_tried)[:20]:
-            lines.append(f"  {idx}")
-        details.extend(lines)
-
-    if folders_not_in_completed:
-        lines = ["", f"Image folders not in any completed CSV (first 20 of {len(folders_not_in_completed):,}):"]
-        for idx in sample_list(folders_not_in_completed)[:20]:
-            lines.append(f"  {idx:06d}")
-        details.extend(lines)
-
-    if duplicate_completed:
-        lines = ["", f"Duplicate completed entries (first 20 of {len(duplicate_completed):,}):"]
-        for idx in sample_list(duplicate_completed)[:20]:
-            lines.append(f"  index {idx} appears {duplicate_completed[idx]}x")
-        details.extend(lines)
-
-    if in_both:
-        lines = ["", f"In BOTH completed and rejected (first 20 of {len(in_both):,}):"]
-        for idx in sample_list(in_both)[:20]:
-            lines.append(f"  {idx}")
-        details.extend(lines)
+    details += _detail_block(
+        "Empty folders — 0 images",
+        sorted(empty_folders),
+        lambda idx: f"{idx:06d}/",
+    )
+    details += _detail_block(
+        "Incomplete folders",
+        sorted(incomplete),
+        lambda x: f"{x[0]:06d}  missing: {x[1]}",
+    )
+    details += _detail_block(
+        "Corrupt images",
+        corrupt_imgs,
+        lambda x: f"{x[0]:06d}/{x[1]}  {x[2]}",
+    )
+    details += _detail_block(
+        "Truncated JPEGs — missing FFD9 end marker",
+        truncated_imgs,
+        lambda x: f"{x[0]:06d}/{x[1]}",
+    )
+    details += _detail_block(
+        "Duplicate views within location — identical file content",
+        duplicate_views,
+        lambda x: f"{x[0]:06d}/{x[1]}  identical to {x[2]}",
+    )
+    details += _detail_block(
+        "Wrong dimensions",
+        bad_dimensions,
+        lambda x: f"{x[0]:06d}/{x[1]}  {x[2]} (expected 1024x1024)",
+    )
+    details += _detail_block(
+        "File size outliers",
+        size_outliers,
+        lambda x: f"{x[0]:06d}/{x[1]}  {x[2]:,} bytes — {x[3]}",
+    )
+    details += _detail_block(
+        "Non-RGB images",
+        bad_color_mode,
+        lambda x: f"{x[0]:06d}/{x[1]}  mode={x[2]} (expected RGB)",
+    )
+    details += _detail_block(
+        f"Blank/degenerate images — std < {BLANK_STD_THRESHOLD}",
+        blank_imgs,
+        lambda x: f"{x[0]:06d}/{x[1]}  std={x[2]}",
+    )
+    details += _detail_block(
+        f"Blurry images — Laplacian variance < {BLUR_THRESHOLD}",
+        blurry_imgs,
+        lambda x: f"{x[0]:06d}/{x[1]}  blur_score={x[2]}",
+    )
+    details += _detail_block(
+        "Missing metadata",
+        sorted(missing_meta),
+        lambda idx: f"{idx:06d}.json",
+    )
+    details += _detail_block(
+        "Corrupt metadata",
+        corrupt_meta,
+        lambda x: f"{x[0]:06d}.json  {x[1]}",
+    )
+    details += _detail_block(
+        "Metadata missing required fields",
+        meta_field_issues,
+        lambda x: f"{x[0]:06d}.json  missing: {x[1]}",
+    )
+    details += _detail_block(
+        "Metadata wrong config values",
+        meta_value_issues,
+        lambda x: f"{x[0]:06d}.json  {x[1]}: expected {x[2]}, got {x[3]}",
+    )
+    details += _detail_block(
+        "Metadata index mismatch",
+        meta_index_mismatch,
+        lambda x: f"folder {x[0]:06d} but JSON has index={x[1]}",
+    )
+    details += _detail_block(
+        "Coordinate mismatch: metadata vs source CSV",
+        coord_mismatches,
+        lambda x: f"{x[0]:06d}  meta=({x[1]:.6f}, {x[2]:.6f})  source=({x[3]:.6f}, {x[4]:.6f})",
+    )
+    details += _detail_block(
+        f"Panorama too far from original location (>{MAX_PANO_DISTANCE_M}m)",
+        sorted(pano_distance_issues, key=lambda x: -x[1]),
+        lambda x: f"{x[0]:06d}  {x[1]:,.0f}m away",
+    )
+    details += _detail_block(
+        "Out-of-bounds coordinates",
+        bad_coords,
+        lambda x: f"{x[0]:06d}  {x[1]}: lat={x[2]}, lon={x[3]}",
+    )
+    details += _detail_block(
+        "Coordinates outside California bbox",
+        outside_california,
+        lambda x: f"{x[0]:06d}  {x[1]}: ({x[2]:.6f}, {x[3]:.6f})",
+    )
+    details += _detail_block(
+        "Non-Google copyright — possible photosphere or user content",
+        copyright_issues,
+        lambda x: f"{x[0]:06d}  copyright={repr(x[1])}",
+    )
+    details += _detail_block(
+        "Wrong country code — expected US",
+        country_code_issues,
+        lambda x: f"{x[0]:06d}  country_code={repr(x[1])}",
+    )
+    details += _detail_block(
+        "Bad capture date format — expected YYYY-MM",
+        bad_dates,
+        lambda x: f"{x[0]:06d}  date={repr(x[1])}",
+    )
+    details += _detail_block(
+        "Panoid mismatch between completed CSV and metadata JSON",
+        panoid_csv_mismatches,
+        lambda x: f"{x[0]:06d}  csv={x[1]}  json={x[2]}",
+    )
+    details += _detail_block(
+        "Duplicate panoids — same panorama used by multiple locations",
+        sorted(duplicate_panoids.items()),
+        lambda x: f"{x[0]}  → indices {sorted(x[1])[:5]}{'...' if len(x[1]) > 5 else ''}",
+    )
+    details += _detail_block(
+        "Unexpected files in image folders",
+        unexpected_files,
+        lambda x: f"{x[0]:06d}/{x[1]}",
+    )
+    details += _detail_block(
+        "Never attempted indices",
+        sorted(never_tried),
+        lambda idx: str(idx),
+    )
+    details += _detail_block(
+        "Image folders not in any completed CSV",
+        sorted(folders_not_in_completed),
+        lambda idx: f"{idx:06d}",
+    )
+    details += _detail_block(
+        "Completed entries without an image folder",
+        sorted(completed_without_folder),
+        lambda idx: f"{idx:06d}",
+    )
+    details += _detail_block(
+        "Duplicate completed entries",
+        sorted(duplicate_completed.items()),
+        lambda x: f"index {x[0]} appears {x[1]}x",
+    )
+    details += _detail_block(
+        "Duplicate rejected entries",
+        sorted(duplicate_rejected.items()),
+        lambda x: f"index {x[0]} appears {x[1]}x",
+    )
+    details += _detail_block(
+        "In BOTH completed and rejected",
+        sorted(in_both),
+        lambda idx: str(idx),
+    )
 
     if details:
         print("\n" + "-" * 60)
@@ -690,6 +872,7 @@ def main():
         print(f"{issues:,} issue(s) found.")
     print(f"Completed in {elapsed:.1f}s")
     print()
+    sys.exit(0 if issues == 0 else 1)
 
 
 if __name__ == "__main__":
