@@ -51,7 +51,7 @@ import tempfile
 from requests.exceptions import Timeout, ConnectionError
 
 # Configuration
-COORDS_FILE = "100k-205k_data.csv"
+COORDS_FILE = "0-100k_data.csv"
 OUTPUT_DIR = Path("salty_data")
 IMAGES_DIR = OUTPUT_DIR / "images"
 METADATA_DIR = OUTPUT_DIR / "metadata"
