@@ -219,7 +219,8 @@ def _detail_block(header, items, formatter, n=20):
         return []
     lst = list(items)
     total = len(lst)
-    lines = ["", f"{header} (first {n} of {total:,}):"]
+    label = f"first {n} of {total:,}" if total > n else f"{total:,}"
+    lines = ["", f"{header} ({label}):"]
     for item in lst[:n]:
         lines.append("  " + formatter(item))
     return lines
@@ -344,14 +345,12 @@ def _scan_all_folders(folders, has_metadata_dir, metadata_dir, source_coords, co
         initializer=_init_worker,
         initargs=(source_coords, completed_panoids),
     ) as executor:
-        futures = {executor.submit(worker, folder): folder for folder in folders}
-        for future in tqdm(as_completed(futures), total=len(folders), desc="Scanning", unit="loc", smoothing=0.3):
-            try:
-                folder_result = future.result()
-            except Exception as e:
-                folder = futures[future]
-                tqdm.write(f"WARNING: Error processing folder {folder.name}: {e}")
-                continue
+        futures = [executor.submit(worker, folder) for folder in folders]
+        for future in tqdm(
+            as_completed(futures),
+            total=len(folders), desc="Scanning", unit="loc", smoothing=0.3,
+        ):
+            folder_result = future.result()
             if folder_result is None:
                 continue
 
@@ -963,28 +962,30 @@ def _check_images(folder, idx, result):
                     result["images_ok"] += 1
                 if img.mode != "RGB":
                     result["bad_color_mode"].append((idx, img_path.name, img.mode))
-                arr = np.array(img, dtype=np.float32)   # (H, W, C) for RGB, (H, W) for grayscale
-                std_val = float(arr.std())
+                # uint8 view — zero-copy buffer from PIL; std on 3MB vs 12MB float32.
+                arr_u8 = np.asarray(img)
+                std_val = float(arr_u8.std())
                 if std_val < BLANK_STD_THRESHOLD:
                     result["blank_imgs"].append((idx, img_path.name, round(std_val, 2)))
-                # Blur detection: Laplacian variance on grayscale.
-                # Fast path for RGB (the expected case): derive luminance from the
-                # already-allocated array using ITU-R BT.601 weights instead of a
-                # second img.convert("L") + np.array() call.
-                if arr.ndim == 3 and arr.shape[2] == 3:
-                    gray = _BT601_R * arr[:, :, 0] + _BT601_G * arr[:, :, 1] + _BT601_B * arr[:, :, 2]
-                elif arr.ndim == 2:
-                    gray = arr  # already grayscale
                 else:
-                    gray = np.array(img.convert("L"), dtype=np.float32)  # RGBA/CMYK/etc.
-                laplacian = (
-                    gray[:-2, 1:-1] + gray[2:, 1:-1]
-                    + gray[1:-1, :-2] + gray[1:-1, 2:]
-                    - 4 * gray[1:-1, 1:-1]
-                )
-                blur_score = float(laplacian.var())
-                if blur_score < BLUR_THRESHOLD:
-                    result["blurry_imgs"].append((idx, img_path.name, round(blur_score, 2)))
+                    # Blur detection: Laplacian variance on grayscale.
+                    # Only run for non-blank images; convert to float32 here rather
+                    # than upfront so blank images never pay the allocation cost.
+                    if arr_u8.ndim == 3 and arr_u8.shape[2] == 3:
+                        arr_f = arr_u8.astype(np.float32)
+                        gray = _BT601_R * arr_f[:, :, 0] + _BT601_G * arr_f[:, :, 1] + _BT601_B * arr_f[:, :, 2]
+                    elif arr_u8.ndim == 2:
+                        gray = arr_u8.astype(np.float32)
+                    else:
+                        gray = np.array(img.convert("L"), dtype=np.float32)  # RGBA/CMYK/etc.
+                    laplacian = (
+                        gray[:-2, 1:-1] + gray[2:, 1:-1]
+                        + gray[1:-1, :-2] + gray[1:-1, 2:]
+                        - 4 * gray[1:-1, 1:-1]
+                    )
+                    blur_score = float(laplacian.var())
+                    if blur_score < BLUR_THRESHOLD:
+                        result["blurry_imgs"].append((idx, img_path.name, round(blur_score, 2)))
         except Exception as e:
             result["corrupt_imgs"].append((idx, img_path.name, str(e)))
 
@@ -1028,7 +1029,7 @@ def _check_metadata(meta_path, idx, source_coords, completed_panoids, result):
 
         # Country code — all California data must be US
         country_code = meta.get("country_code", "")
-        if not country_code or country_code != "US":
+        if country_code and country_code != "US":
             result["country_code_issues"].append((idx, country_code))
 
         # Capture date format — must be YYYY-MM if present
@@ -1128,7 +1129,10 @@ def _process_folder(folder, has_metadata_dir, metadata_dir):
         panoid_csv_mismatches=[],
     )
 
-    _check_images(folder, idx, result)
+    try:
+        _check_images(folder, idx, result)
+    except Exception as e:
+        result["corrupt_imgs"].append((idx, "?", f"unreadable folder: {e}"))
 
     if has_metadata_dir:
         meta_path = metadata_dir / f"{idx:06d}.json"
