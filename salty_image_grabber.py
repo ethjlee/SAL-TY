@@ -32,257 +32,264 @@ Stealth Protocol:
 - Randomized sleep between requests (0.25-1.0s)
 """
 
-import streetlevel.streetview as streetview
-import pandas as pd
-import numpy as np
-import time
-import random
 import argparse
-from pathlib import Path
-from datetime import datetime
-from tqdm import tqdm
 import json
 import logging
-import traceback
-from PIL import Image
-import pytorch360convert
-import torch
+import os
+import random
+import shutil
 import tempfile
-from requests.exceptions import Timeout, ConnectionError
+import time
+import traceback
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 
+import numpy as np
+import pandas as pd
+import pytorch360convert
+import streetlevel.streetview as streetview
+import torch
+from PIL import Image
+from requests.exceptions import ConnectionError, Timeout
+from tqdm import tqdm
+
+# ---------------------------------------------------------------------------
 # Configuration
+# ---------------------------------------------------------------------------
+
 COORDS_FILE = "0-100k_data.csv"
-OUTPUT_DIR = Path("salty_data")
-IMAGES_DIR = OUTPUT_DIR / "images"
-METADATA_DIR = OUTPUT_DIR / "metadata"
-COMPLETED_FILE = OUTPUT_DIR / "completed.csv"
-REJECTS_FILE = OUTPUT_DIR / "rejects.csv"
-LOG_FILE = OUTPUT_DIR / "scraper.log"
+OUTPUT_DIR  = Path("salty_data")
 
-# Download settings
-PANO_ZOOM = 3  # Zoom level for downloading equirectangular panorama (HIGHER RESOLUTION)
-VIEW_HEIGHT = 1024  # Height of extracted perspective views
-VIEW_WIDTH = 1024   # Width of extracted perspective views
-VIEW_FOV = 90.0     # Field of view for perspective views (degrees)
-HEADINGS = [0, 90, 180, 270]  # Cardinal directions to extract
+PANO_ZOOM   = 3      # Zoom level for downloading equirectangular panorama
+VIEW_HEIGHT = 1024   # Height of extracted perspective views
+VIEW_WIDTH  = 1024   # Width of extracted perspective views
+VIEW_FOV    = 90.0   # Field of view for perspective views (degrees)
+HEADINGS    = [0, 90, 180, 270]
 
-# Stealth settings
-MIN_SLEEP = 0.25   # Minimum seconds between requests
-MAX_SLEEP = 1.0  # Maximum seconds between requests
+MIN_SLEEP = 0.25
+MAX_SLEEP = 1.0
 
-# Error handling
-MAX_CONSECUTIVE_TIMEOUTS = 5  # Terminate after this many consecutive timeouts
-MAX_CONSECUTIVE_ERRORS = 10   # Terminate after this many consecutive errors of ANY type (likely IP ban)
+MAX_CONSECUTIVE_TIMEOUTS = 5   # Terminate after this many consecutive timeouts
+MAX_CONSECUTIVE_ERRORS   = 10  # Terminate after this many consecutive errors (likely IP ban)
 
-# Setup logging
-def setup_logging():
+
+# ---------------------------------------------------------------------------
+# Path layout
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _Paths:
+    images:        Path
+    metadata:      Path
+    completed_csv: Path
+    rejects_csv:   Path
+    log_file:      Path
+
+    @classmethod
+    def from_output_dir(cls, output_dir: Path, shard: int = 0) -> "_Paths":
+        suffix = f"_{shard}" if shard > 0 else ""
+        return cls(
+            images=output_dir / "images",
+            metadata=output_dir / "metadata",
+            completed_csv=output_dir / f"completed{suffix}.csv",
+            rejects_csv=output_dir / f"rejects{suffix}.csv",
+            log_file=output_dir / f"scraper{suffix}.log",
+        )
+
+
+# ---------------------------------------------------------------------------
+# CSV helpers
+# ---------------------------------------------------------------------------
+
+def _load_index_set(csv_path):
+    """Load a set of integer indices from a CSV's 'index' column."""
+    if not csv_path.exists():
+        return set()
+    try:
+        df = pd.read_csv(csv_path)
+        return set(pd.to_numeric(df["index"], errors="coerce").dropna().astype(int))
+    except Exception:
+        return set()
+
+
+def _write_csv_row(csv_path, row_dict):
+    """Append a single row to a CSV using append mode (O(1), safe for hot paths)."""
+    df = pd.DataFrame([row_dict])
+    if csv_path.exists():
+        df.to_csv(csv_path, mode="a", header=False, index=False)
+    else:
+        df.to_csv(csv_path, mode="w", header=True, index=False)
+
+
+def save_completed(idx, panoid, lat, lon, paths):
+    """Record a successfully downloaded location using the original request coords."""
+    _write_csv_row(paths.completed_csv, {
+        "timestamp": datetime.now().isoformat(),
+        "index":     idx,
+        "panoid":    panoid,
+        "lat":       lat,
+        "lon":       lon,
+    })
+
+
+def save_reject(idx, lat, lon, reason, paths, panoid=None):
+    """Record a rejected location."""
+    _write_csv_row(paths.rejects_csv, {
+        "timestamp": datetime.now().isoformat(),
+        "index":     idx,
+        "lat":       lat,
+        "lon":       lon,
+        "reason":    reason,
+        "panoid":    panoid if panoid else "N/A",
+    })
+
+
+# ---------------------------------------------------------------------------
+# Setup
+# ---------------------------------------------------------------------------
+
+def setup_logging(log_file):
     """Initialize logging to file only (tqdm handles console)."""
-    OUTPUT_DIR.mkdir(exist_ok=True)
-
+    log_file.parent.mkdir(exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(LOG_FILE)
-        ]
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        handlers=[logging.FileHandler(log_file)],
     )
 
-def setup_directories():
+
+def setup_directories(paths):
     """Create necessary directory structure."""
-    IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-    METADATA_DIR.mkdir(parents=True, exist_ok=True)
-    logging.info(f"Directory structure created: {OUTPUT_DIR}")
+    paths.images.mkdir(parents=True, exist_ok=True)
+    paths.metadata.mkdir(parents=True, exist_ok=True)
+    logging.info(f"Directory structure created: {paths.images.parent}")
 
-def load_coordinates():
-    """Load the 100k California coordinate dataset."""
-    df = pd.read_csv(COORDS_FILE)
-    logging.info(f"Loaded {len(df)} coordinates from {COORDS_FILE}")
-    logging.info(f"Columns: {list(df.columns)}")
-    return df
 
-def load_completed():
-    """Load set of completed location indices."""
-    if COMPLETED_FILE.exists():
-        df = pd.read_csv(COMPLETED_FILE)
-        completed = set(df['index'].values)
-        logging.info(f"Found {len(completed)} completed locations")
-        return completed
-    else:
-        logging.info("No completed locations found (fresh start)")
-        return set()
-
-def load_rejects():
-    """Load set of rejected location indices."""
-    if REJECTS_FILE.exists():
-        df = pd.read_csv(REJECTS_FILE)
-        rejects = set(df['index'].values)
-        logging.info(f"Found {len(rejects)} rejected locations")
-        return rejects
-    else:
-        logging.info("No rejected locations found")
-        return set()
-
-def save_completed(index, panoid, lat, lon):
-    """Append completed location to CSV."""
-    entry = {
-        'timestamp': datetime.now().isoformat(),
-        'index': index,
-        'panoid': panoid,
-        'lat': lat,
-        'lon': lon
-    }
-
-    df = pd.DataFrame([entry])
-    if COMPLETED_FILE.exists():
-        df.to_csv(COMPLETED_FILE, mode='a', header=False, index=False)
-    else:
-        df.to_csv(COMPLETED_FILE, mode='w', header=True, index=False)
-
-def save_reject(index, lat, lon, reason, panoid=None):
-    """Append rejected location to CSV."""
-    entry = {
-        'timestamp': datetime.now().isoformat(),
-        'index': index,
-        'lat': lat,
-        'lon': lon,
-        'reason': reason,
-        'panoid': panoid if panoid else 'N/A'
-    }
-
-    df = pd.DataFrame([entry])
-    if REJECTS_FILE.exists():
-        df.to_csv(REJECTS_FILE, mode='a', header=False, index=False)
-    else:
-        df.to_csv(REJECTS_FILE, mode='w', header=True, index=False)
+# ---------------------------------------------------------------------------
+# Quality control
+# ---------------------------------------------------------------------------
 
 def is_quality_panorama(pano):
     """
     Quality control filter for Street View panoramas.
-
     Only accepts official Google Street View imagery.
-
-    Returns:
-        tuple: (is_valid, reason_if_invalid)
+    Returns: (is_valid, reason_if_invalid)
     """
-    # Only accept images with Google copyright
-    if hasattr(pano, 'copyright_message') and pano.copyright_message:
-        if 'google' in pano.copyright_message.lower():
+    if hasattr(pano, "copyright_message") and pano.copyright_message:
+        if "google" in pano.copyright_message.lower():
             return True, ""
-        else:
-            return False, "non_google_copyright"
-
-    # If no copyright message, reject to be safe
+        return False, "non_google_copyright"
     return False, "no_copyright_info"
+
+
+# ---------------------------------------------------------------------------
+# Image extraction
+# ---------------------------------------------------------------------------
 
 def extract_perspective_views(pano_image, headings, output_dir):
     """
     Extract perspective views at specified headings from equirectangular panorama.
-
-    Args:
-        pano_image: PIL Image of equirectangular panorama
-        headings: List of heading angles in degrees
-        output_dir: Path to save extracted views
-
-    Returns:
-        bool: Success status
+    Returns True on success.
     """
     try:
-        # Convert PIL image to numpy array then to torch tensor
-        pano_array = np.array(pano_image)
-
-        # Convert to torch tensor: (H, W, C) -> (C, H, W)
+        pano_array  = np.array(pano_image)
         pano_tensor = torch.from_numpy(pano_array).permute(2, 0, 1).float()
 
-        # Extract view at each heading
         for heading in headings:
-            # Extract perspective view using pytorch360convert
             view_tensor = pytorch360convert.e2p(
                 e_img=pano_tensor,
                 fov_deg=VIEW_FOV,
                 h_deg=heading,
                 v_deg=0.0,
                 out_hw=(VIEW_HEIGHT, VIEW_WIDTH),
-                mode='bilinear',
-                channels_first=True
+                mode="bilinear",
+                channels_first=True,
             )
-
-            # Convert back to numpy: (C, H, W) -> (H, W, C)
-            view_array = view_tensor.permute(1, 2, 0).numpy().astype('uint8')
-
-            # Convert to PIL Image and save
-            view_image = Image.fromarray(view_array)
-            output_path = output_dir / f"{heading:03d}.jpg"
-            view_image.save(output_path, quality=90, optimize=True)
+            view_array = view_tensor.permute(1, 2, 0).numpy().clip(0, 255).astype("uint8")
+            Image.fromarray(view_array).save(
+                output_dir / f"{heading:03d}.jpg", quality=90, optimize=True
+            )
 
         return True
 
     except Exception as e:
-        logging.error(f"Error extracting views: {str(e)}")
+        logging.error(f"Error extracting views: {e}")
         logging.error(traceback.format_exc())
         return False
 
-def download_location(row, completed_indices, rejected_indices):
+
+# ---------------------------------------------------------------------------
+# Metadata
+# ---------------------------------------------------------------------------
+
+def _build_metadata(idx, pano, lat, lon):
+    """Construct the metadata dict for a successfully downloaded location."""
+    return {
+        "index":              int(idx),
+        "panoid":             pano.id,
+        "pano_lat":           pano.lat,
+        "pano_lon":           pano.lon,
+        "original_lat":       float(lat),
+        "original_lon":       float(lon),
+        "date":               str(pano.date) if getattr(pano, "date", None) else None,
+        "copyright":          getattr(pano, "copyright_message", None),
+        "heading":            getattr(pano, "heading", None),
+        "pitch":              getattr(pano, "pitch", None),
+        "roll":               getattr(pano, "roll", None),
+        "street_names":       [str(s) for s in pano.street_names] if getattr(pano, "street_names", None) else None,
+        "address":            str(pano.address) if getattr(pano, "address", None) else None,
+        "country_code":       str(pano.country_code) if getattr(pano, "country_code", None) else None,
+        "download_timestamp": datetime.now().isoformat(),
+        "headings":           HEADINGS,
+        "view_resolution":    f"{VIEW_WIDTH}x{VIEW_HEIGHT}",
+        "view_fov":           VIEW_FOV,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Download
+# ---------------------------------------------------------------------------
+
+def download_location(row, completed, rejected, paths):
     """
     Download panorama and extract 4 directional views for a single location.
-
-    Args:
-        row: DataFrame row containing coordinate data
-        completed_indices: Set of already completed indices
-        rejected_indices: Set of already rejected indices
-
-    Returns:
-        tuple: (success, skip_reason)
-            success: True if downloaded successfully
-            skip_reason: Reason for skip/failure if applicable
+    Returns: (success, skip_reason)
     """
-    idx = int(row.iloc[0])  # First column is index
-    lat = row.iloc[1]  # Second column is latitude
-    lon = row.iloc[2]  # Third column is longitude
+    idx = int(row.iloc[0])
+    lat = row.iloc[1]
+    lon = row.iloc[2]
 
-    # Skip if already completed
-    if idx in completed_indices:
+    if idx in completed:
         return False, "already_completed"
-
-    # Skip if already rejected
-    if idx in rejected_indices:
+    if idx in rejected:
         return False, "already_rejected"
 
     tmp_path = None
     try:
-        # Find nearest panorama
         pano = streetview.find_panorama(lat, lon)
 
         if pano is None:
             logging.warning(f"[{idx}] No panorama found at ({lat:.6f}, {lon:.6f})")
-            save_reject(idx, lat, lon, "no_panorama_found")
+            save_reject(idx, lat, lon, "no_panorama_found", paths)
             return False, "no_panorama"
 
-        # Quality control check
         is_valid, reason = is_quality_panorama(pano)
         if not is_valid:
             logging.info(f"[{idx}] Rejected: {reason} (panoid: {pano.id})")
-            save_reject(idx, lat, lon, reason, pano.id)
+            save_reject(idx, lat, lon, reason, paths, pano.id)
             return False, f"qc_failed_{reason}"
 
-        # Create location directory
-        location_dir = IMAGES_DIR / f"{idx:06d}"
+        location_dir = paths.images / f"{idx:06d}"
         location_dir.mkdir(parents=True, exist_ok=True)
 
-        # Download equirectangular panorama to temporary file
-        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
             tmp_path = tmp.name
-            streetview.download_panorama(pano, tmp_path, PANO_ZOOM)
+        streetview.download_panorama(pano, tmp_path, PANO_ZOOM)
 
-        # Load into PIL Image (outside with block)
-        pano_image = Image.open(tmp_path)
+        with Image.open(tmp_path) as pano_image:
+            success = extract_perspective_views(pano_image, HEADINGS, location_dir)
 
-        # Extract 4 directional views
-        success = extract_perspective_views(pano_image, HEADINGS, location_dir)
-
-        # Close image to release file handle before deleting
-        pano_image.close()
-
-        # Clean up temp panorama file (we only keep the 4 extracted views)
         try:
             Path(tmp_path).unlink()
         except Exception as e:
@@ -291,94 +298,83 @@ def download_location(row, completed_indices, rejected_indices):
 
         if not success:
             logging.error(f"[{idx}] Failed to extract views")
-            save_reject(idx, lat, lon, "view_extraction_failed", pano.id)
+            try:
+                shutil.rmtree(location_dir, ignore_errors=True)
+            except Exception as e:
+                logging.warning(f"[{idx}] Could not clean up failed folder {location_dir}: {e}")
+            save_reject(idx, lat, lon, "view_extraction_failed", paths, pano.id)
             return False, "extraction_failed"
 
-        # Save metadata
-        metadata = {
-            'index': int(idx),
-            'panoid': pano.id,
-            'pano_lat': pano.lat,
-            'pano_lon': pano.lon,
-            'original_lat': float(lat),
-            'original_lon': float(lon),
-            'date': str(pano.date) if hasattr(pano, 'date') and pano.date else None,
-            'copyright': getattr(pano, 'copyright_message', None),
-            'heading': getattr(pano, 'heading', None),
-            'pitch': getattr(pano, 'pitch', None),
-            'roll': getattr(pano, 'roll', None),
-            'street_names': [str(s) for s in pano.street_names] if getattr(pano, 'street_names', None) else None,
-            'address': str(pano.address) if getattr(pano, 'address', None) else None,
-            'country_code': str(pano.country_code) if getattr(pano, 'country_code', None) else None,
-            'download_timestamp': datetime.now().isoformat(),
-            'headings': HEADINGS,
-            'view_resolution': f"{VIEW_WIDTH}x{VIEW_HEIGHT}",
-            'view_fov': VIEW_FOV
-        }
-
-        metadata_path = METADATA_DIR / f"{idx:06d}.json"
-        with open(metadata_path, 'w') as f:
-            json.dump(metadata, f, indent=2)
-
-        # Mark as completed
-        save_completed(idx, pano.id, pano.lat, pano.lon)
+        meta_path = paths.metadata / f"{idx:06d}.json"
+        meta_tmp  = meta_path.with_suffix(".tmp")
+        meta_tmp.write_text(json.dumps(_build_metadata(idx, pano, lat, lon), indent=2), encoding="utf-8")
+        os.replace(meta_tmp, meta_path)
+        save_completed(idx, pano.id, lat, lon, paths)
         logging.info(f"[{idx}] Downloaded 4 views (panoid: {pano.id})")
-
         return True, None
 
     except (Timeout, ConnectionError) as e:
-        logging.warning(f"[{idx}] Network error (timeout/connection): {str(e)}")
-        save_reject(idx, lat, lon, "network_timeout")
+        logging.warning(f"[{idx}] Network error (timeout/connection): {e}")
+        save_reject(idx, lat, lon, "network_timeout", paths)
         return False, "timeout"
 
     except Exception as e:
-        logging.error(f"[{idx}] Error: {str(e)}")
+        logging.error(f"[{idx}] Error: {e}")
         logging.error(traceback.format_exc())
-        save_reject(idx, lat, lon, f"error_{type(e).__name__}")
+        save_reject(idx, lat, lon, f"error_{type(e).__name__}", paths)
         return False, "exception"
 
     finally:
-        # Clean up temp file if it wasn't already deleted
         if tmp_path:
             try:
                 Path(tmp_path).unlink()
             except Exception:
                 pass
 
-def backfill_metadata():
+
+# ---------------------------------------------------------------------------
+# Metadata backfill
+# ---------------------------------------------------------------------------
+
+def backfill_metadata(paths, coords_df):
     """
     Check all existing metadata JSON files and backfill new fields
     (heading, pitch, roll, etc.) for any that are missing them.
-    Files already containing the new fields are skipped instantly.
+    Files already containing all fields are skipped instantly.
     Corrupt JSON files are repaired by looking up coordinates from the CSV.
     """
-    metadata_files = sorted(METADATA_DIR.glob("*.json"))
+    metadata_files = sorted(paths.metadata.glob("*.json"))
     if not metadata_files:
         return True
 
-    # Load coordinates CSV for repairing corrupt metadata
-    coords_df = pd.read_csv(COORDS_FILE)
-
     print(f"Checking {len(metadata_files)} metadata files for backfill...")
     logging.info(f"Checking {len(metadata_files)} metadata files for backfill")
-    updated = 0
-    repaired = 0
+
+    n_updated = n_repaired = 0
     consecutive_errors = 0
+
+    api_fields    = ["heading", "pitch", "roll", "street_names", "address", "country_code"]
+    config_fields = {
+        "headings":        HEADINGS,
+        "view_resolution": f"{VIEW_WIDTH}x{VIEW_HEIGHT}",
+        "view_fov":        VIEW_FOV,
+    }
+    all_backfill_fields = api_fields + list(config_fields)
 
     with tqdm(total=len(metadata_files), desc="Backfill Metadata") as pbar:
         for meta_path in metadata_files:
+            made_api_call = False
             try:
                 # Try to parse the JSON
                 corrupt = False
                 try:
-                    with open(meta_path, 'r') as f:
+                    with open(meta_path, encoding="utf-8") as f:
                         metadata = json.load(f)
                 except (json.JSONDecodeError, ValueError):
                     corrupt = True
 
                 if corrupt:
-                    # Repair: extract index from filename, look up coords in CSV
-                    idx = int(meta_path.stem)  # e.g. "000151" -> 151
+                    idx = int(meta_path.stem)
                     row = coords_df[coords_df.iloc[:, 0] == idx]
                     if row.empty:
                         logging.warning(f"Backfill: corrupt JSON {meta_path.name}, index {idx} not found in CSV, skipping")
@@ -387,39 +383,21 @@ def backfill_metadata():
 
                     lat = float(row.iloc[0, 1])
                     lon = float(row.iloc[0, 2])
-
                     pano = streetview.find_panorama(lat, lon)
+                    made_api_call = True
+
                     if pano is None:
                         logging.warning(f"Backfill: corrupt JSON {meta_path.name}, no panorama found, skipping")
                         pbar.update(1)
                         time.sleep(random.uniform(MIN_SLEEP, MAX_SLEEP))
                         continue
 
-                    # Rebuild the full metadata from scratch
-                    metadata = {
-                        'index': idx,
-                        'panoid': pano.id,
-                        'pano_lat': pano.lat,
-                        'pano_lon': pano.lon,
-                        'original_lat': lat,
-                        'original_lon': lon,
-                        'date': str(pano.date) if hasattr(pano, 'date') and pano.date else None,
-                        'copyright': getattr(pano, 'copyright_message', None),
-                        'heading': getattr(pano, 'heading', None),
-                        'pitch': getattr(pano, 'pitch', None),
-                        'roll': getattr(pano, 'roll', None),
-                        'street_names': [str(s) for s in pano.street_names] if getattr(pano, 'street_names', None) else None,
-                        'address': str(pano.address) if getattr(pano, 'address', None) else None,
-                        'country_code': str(pano.country_code) if getattr(pano, 'country_code', None) else None,
-                        'download_timestamp': None,  # Unknown — original was corrupt
-                        'headings': HEADINGS,
-                        'view_resolution': f"{VIEW_WIDTH}x{VIEW_HEIGHT}",
-                        'view_fov': VIEW_FOV
-                    }
-
-                    with open(meta_path, 'w') as f:
-                        json.dump(metadata, f, indent=2)
-                    repaired += 1
+                    metadata = _build_metadata(idx, pano, lat, lon)
+                    metadata["download_timestamp"] = None  # Unknown — original was corrupt
+                    meta_tmp = meta_path.with_suffix(".tmp")
+                    meta_tmp.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+                    os.replace(meta_tmp, meta_path)
+                    n_repaired += 1
                     logging.info(f"Backfill: repaired corrupt JSON {meta_path.name}")
                     consecutive_errors = 0
                     pbar.update(1)
@@ -427,51 +405,45 @@ def backfill_metadata():
                     continue
 
                 # Check which fields are missing
-                api_fields = ['heading', 'pitch', 'roll', 'street_names', 'address', 'country_code']
-                config_fields = {'headings': HEADINGS, 'view_resolution': f"{VIEW_WIDTH}x{VIEW_HEIGHT}", 'view_fov': VIEW_FOV}
-                fixable_fields = api_fields + list(config_fields.keys())
-
-                missing = [f for f in fixable_fields if f not in metadata]
+                missing = [f for f in all_backfill_fields if f not in metadata]
                 if not missing:
                     pbar.update(1)
                     continue
 
-                # Fill in config fields (no API call needed)
-                needs_api = False
+                # Fill config fields (no API call needed)
                 for field in missing:
                     if field in config_fields:
                         metadata[field] = config_fields[field]
-                    elif field in api_fields:
-                        needs_api = True
 
-                # Fill in API fields if needed
+                # Fill API fields if needed
+                needs_api = any(f in api_fields for f in missing)
                 if needs_api:
-                    pano = streetview.find_panorama_by_id(metadata['panoid'])
+                    pano = streetview.find_panorama_by_id(metadata["panoid"])
+                    made_api_call = True
                     if pano is None:
                         pano = streetview.find_panorama(
-                            metadata['original_lat'],
-                            metadata['original_lon']
+                            metadata["original_lat"], metadata["original_lon"]
                         )
-                        if pano is None or pano.id != metadata['panoid']:
+                        if pano is None or pano.id != metadata["panoid"]:
                             logging.warning(f"Backfill: panoid {metadata['panoid']} not found for {meta_path.name}, skipping")
                             pbar.update(1)
                             time.sleep(random.uniform(MIN_SLEEP, MAX_SLEEP))
                             continue
 
-                    metadata['heading'] = getattr(pano, 'heading', None)
-                    metadata['pitch'] = getattr(pano, 'pitch', None)
-                    metadata['roll'] = getattr(pano, 'roll', None)
-                    metadata['street_names'] = [str(s) for s in pano.street_names] if getattr(pano, 'street_names', None) else None
-                    metadata['address'] = str(pano.address) if getattr(pano, 'address', None) else None
-                    metadata['country_code'] = str(pano.country_code) if getattr(pano, 'country_code', None) else None
+                    metadata.update({
+                        "heading":      getattr(pano, "heading", None),
+                        "pitch":        getattr(pano, "pitch", None),
+                        "roll":         getattr(pano, "roll", None),
+                        "street_names": [str(s) for s in pano.street_names] if getattr(pano, "street_names", None) else None,
+                        "address":      str(pano.address) if getattr(pano, "address", None) else None,
+                        "country_code": str(pano.country_code) if getattr(pano, "country_code", None) else None,
+                    })
 
-                with open(meta_path, 'w') as f:
-                    json.dump(metadata, f, indent=2)
-                updated += 1
-
+                meta_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+                n_updated += 1
                 consecutive_errors = 0
                 pbar.update(1)
-                if needs_api:
+                if made_api_call:
                     time.sleep(random.uniform(MIN_SLEEP, MAX_SLEEP))
 
             except Exception as e:
@@ -484,36 +456,38 @@ def backfill_metadata():
                     print(f"Backfill aborted: {MAX_CONSECUTIVE_ERRORS} consecutive errors")
                     return False
 
-    print(f"Backfill complete: {updated} updated, {repaired} repaired")
-    logging.info(f"Backfill complete: {updated} updated, {repaired} repaired out of {len(metadata_files)} files")
+    print(f"Backfill complete: {n_updated} updated, {n_repaired} repaired")
+    logging.info(f"Backfill complete: {n_updated} updated, {n_repaired} repaired out of {len(metadata_files)} files")
     return True
+
+
+# ---------------------------------------------------------------------------
+# Utilities
+# ---------------------------------------------------------------------------
 
 def stealth_sleep():
     """Randomized sleep between requests."""
-    sleep_time = random.uniform(MIN_SLEEP, MAX_SLEEP)
-    time.sleep(sleep_time)
+    time.sleep(random.uniform(MIN_SLEEP, MAX_SLEEP))
 
 
 def parse_args():
     """Parse command-line arguments for parallel operation."""
-    parser = argparse.ArgumentParser(description='SALTY Street View Scraper')
-    parser.add_argument('--start-index', type=int, default=0,
-                        help='First coordinate index to process (inclusive, default: 0)')
-    parser.add_argument('--end-index', type=int, default=None,
-                        help='Last coordinate index to process (inclusive, default: all)')
+    parser = argparse.ArgumentParser(description="SALTY Street View Scraper")
+    parser.add_argument("--start-index", type=int, default=0,
+                        help="First coordinate index to process (inclusive, default: 0)")
+    parser.add_argument("--end-index", type=int, default=None,
+                        help="Last coordinate index to process (inclusive, default: all)")
     return parser.parse_args()
 
 
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
 def main():
-    """Main execution function."""
     args = parse_args()
 
-    # Instance-specific file paths when running in parallel (start-index > 0)
-    if args.start_index > 0:
-        global COMPLETED_FILE, REJECTS_FILE, LOG_FILE
-        COMPLETED_FILE = OUTPUT_DIR / f"completed_{args.start_index}.csv"
-        REJECTS_FILE = OUTPUT_DIR / f"rejects_{args.start_index}.csv"
-        LOG_FILE = OUTPUT_DIR / f"scraper_{args.start_index}.log"
+    paths = _Paths.from_output_dir(OUTPUT_DIR, shard=args.start_index)
 
     print("=" * 70)
     print("SALTY SCRAPER - Multi-View Google Street View Data Acquisition")
@@ -525,12 +499,15 @@ def main():
     print("=" * 70)
     print()
 
-    # Setup
-    setup_logging()
-    setup_directories()
+    setup_logging(paths.log_file)
+    setup_directories(paths)
 
-    # Load data
-    coords_df = load_coordinates()
+    coords_df = pd.read_csv(COORDS_FILE)
+    logging.info(f"Loaded {len(coords_df)} coordinates from {COORDS_FILE}")
+
+    # Keep full coords for backfill — corrupt JSON repair needs to look up any index,
+    # not just those in the current shard's slice.
+    coords_df_full = coords_df
 
     # Slice to assigned row range (for parallel operation)
     # --start-index / --end-index are row positions in the CSV (0-99999),
@@ -538,26 +515,27 @@ def main():
     if args.start_index > 0 or args.end_index is not None:
         end = args.end_index + 1 if args.end_index is not None else len(coords_df)
         coords_df = coords_df.iloc[args.start_index:end].reset_index(drop=True)
-        logging.info(f"Row slice: {args.start_index} - {args.end_index or 'end'} → {len(coords_df)} coordinates")
+        logging.info(f"Row slice: {args.start_index} - {args.end_index or 'end'} -> {len(coords_df)} coordinates")
 
-    completed = load_completed()
-    rejected = load_rejects()
+    completed = _load_index_set(paths.completed_csv)
+    rejected  = _load_index_set(paths.rejects_csv)
 
-    # Backfill old metadata files with new fields (skips files already updated)
-    if not backfill_metadata():
+    logging.info(f"Found {len(completed)} completed locations")
+    logging.info(f"Found {len(rejected)} rejected locations")
+
+    if not backfill_metadata(paths, coords_df_full):
         print("Terminating due to backfill failure (network issue?)")
         return
 
-    # Statistics
-    total = len(coords_df)
-    already_done = len(completed) + len(rejected)
+    total      = len(coords_df)
+    already_done = len(completed | rejected)
     remaining = total - already_done
 
     print(f"Total coordinates: {total:,}")
     print(f"Completed: {len(completed):,}")
-    print(f"Rejected: {len(rejected):,}")
+    print(f"Rejected:  {len(rejected):,}")
     print(f"Remaining: {remaining:,}")
-    print(f"")
+    print()
     print(f"Output: 4 views per location (0, 90, 180, 270 degrees)")
     print(f"View size: {VIEW_WIDTH}x{VIEW_HEIGHT} @ {VIEW_FOV} degree FOV")
     print(f"Panorama zoom: {PANO_ZOOM} (Higher resolution)")
@@ -570,25 +548,19 @@ def main():
         print("All locations processed!")
         return
 
-    # Confirmation (auto-confirmed for unattended operation)
-    response = 'y'  # Auto-confirm for detached mode
-    # response = input("Start/resume download? [y/N]: ")  # Commented out for unattended runs
-    if response.lower() != 'y':
-        print("Aborted.")
-        return
+    # Auto-confirmed for unattended/detached operation
+    # response = input("Start/resume download? [y/N]: ")
+    # if response.lower() != "y":
+    #     print("Aborted.")
+    #     return
 
-    print()
-    logging.info("="*50)
+    logging.info("=" * 50)
     logging.info("Starting SALTY multi-view scraper (ZOOM 3, Q90)")
     logging.info(f"Target: {remaining:,} locations")
-    logging.info("="*50)
+    logging.info("=" * 50)
 
-    # Download loop
-    success_count = 0
-    error_count = 0
-    processed = 0
-    consecutive_timeouts = 0
-    consecutive_errors = 0
+    success_count = error_count = processed = 0
+    consecutive_timeouts = consecutive_errors = 0
 
     with tqdm(
         total=remaining,
@@ -596,41 +568,37 @@ def main():
         leave=True,
         miniters=1,
         mininterval=0,
-        bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}, {postfix}]'
+        bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}, {postfix}]",
     ) as pbar:
 
         for _, row in coords_df.iterrows():
             idx = int(row.iloc[0])
 
-            # Skip if already processed
             if idx in completed or idx in rejected:
                 continue
 
-            # Download location with 4 views
-            success, reason = download_location(row, completed, rejected)
+            success, reason = download_location(row, completed, rejected, paths)
 
             if success:
                 success_count += 1
                 completed.add(idx)
-                consecutive_timeouts = 0  # Reset on success
-                consecutive_errors = 0    # Reset on success
+                consecutive_timeouts = 0
+                consecutive_errors   = 0
             else:
-                if reason not in ["already_completed", "already_rejected"]:
+                if reason not in ("already_completed", "already_rejected"):
                     rejected.add(idx)
 
-                    # Non-error rejections (API worked, just no usable panorama)
-                    if reason in ["no_panorama"] or reason.startswith("qc_failed"):
-                        consecutive_timeouts = 0  # API responded, network is fine
-                        consecutive_errors = 0
+                    if reason in ("no_panorama",) or reason.startswith("qc_failed"):
+                        # API responded fine — not a network/error issue
+                        consecutive_timeouts = 0
+                        consecutive_errors   = 0
                     else:
-                        error_count += 1
+                        error_count       += 1
                         consecutive_errors += 1
 
-                        # Track consecutive timeouts
                         if reason == "timeout":
                             consecutive_timeouts += 1
                             logging.warning(f"Consecutive timeouts: {consecutive_timeouts}/{MAX_CONSECUTIVE_TIMEOUTS}")
-
                             if consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS:
                                 logging.error(f"TERMINATING: {MAX_CONSECUTIVE_TIMEOUTS} consecutive timeouts reached")
                                 pbar.write(f"\nERROR: {MAX_CONSECUTIVE_TIMEOUTS} consecutive network timeouts.")
@@ -638,9 +606,8 @@ def main():
                                 pbar.write(f"Progress saved. {success_count} locations downloaded before termination.")
                                 break
                         else:
-                            consecutive_timeouts = 0  # Reset on non-timeout error
+                            consecutive_timeouts = 0
 
-                        # Track consecutive errors of ANY type (IP ban detection)
                         if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
                             logging.error(f"TERMINATING: {MAX_CONSECUTIVE_ERRORS} consecutive errors reached. Possible IP ban.")
                             pbar.write(f"\nERROR: {MAX_CONSECUTIVE_ERRORS} consecutive errors detected.")
@@ -649,34 +616,32 @@ def main():
                             break
 
             processed += 1
-
             pbar.update(1)
             pbar.set_postfix_str(f"✓ {success_count} ✗ {error_count} | rate:{success_count/processed*100:.0f}%")
 
-            # Stealth sleep (only if we actually tried to download)
-            if reason not in ["already_completed", "already_rejected"]:
+            if reason not in ("already_completed", "already_rejected"):
                 stealth_sleep()
 
-    # Final summary
     print()
-    print("="*70)
+    print("=" * 70)
     print("DOWNLOAD COMPLETE")
-    print("="*70)
+    print("=" * 70)
     print(f"Successfully downloaded: {success_count:,} locations ({success_count * 4:,} images)")
     print(f"Rejected: {error_count:,} locations")
     print(f"Total processed: {processed:,}")
     if processed > 0:
-        print(f"Success rate: {success_count/processed*100:.1f}%")
-    print(f"Images location: {IMAGES_DIR}")
-    print(f"Metadata location: {METADATA_DIR}")
-    print(f"Completed log: {COMPLETED_FILE}")
-    print(f"Rejects log: {REJECTS_FILE}")
+        print(f"Success rate: {success_count / processed * 100:.1f}%")
+    print(f"Images location:   {paths.images}")
+    print(f"Metadata location: {paths.metadata}")
+    print(f"Completed log:     {paths.completed_csv}")
+    print(f"Rejects log:       {paths.rejects_csv}")
     print()
 
-    logging.info("="*50)
+    logging.info("=" * 50)
     logging.info("SALTY scraper completed")
     logging.info(f"Success: {success_count:,} | Rejected: {error_count:,}")
-    logging.info("="*50)
+    logging.info("=" * 50)
+
 
 if __name__ == "__main__":
     main()

@@ -25,12 +25,12 @@ from functools import partial
 from math import asin, cos, radians, sin, sqrt
 from pathlib import Path
 
-_DATE_RE = re.compile(r"^\d{4}-\d{2}$")
-
 from PIL import Image
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}$")
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +69,7 @@ CA_LON_MIN, CA_LON_MAX = -124.6, -114.0
 # Coordinate comparison tolerance — ~111m at equator
 COORD_TOLERANCE = 0.001
 
-# ITU-R BT.601 luminance weights for fast RGB → grayscale (avoids second PIL decode)
+# ITU-R BT.601 luminance weights for fast RGB -> grayscale (avoids second PIL decode)
 _BT601_R, _BT601_G, _BT601_B = 0.299, 0.587, 0.114
 
 # JPEG end-of-image marker for truncation check
@@ -99,7 +99,7 @@ class ScanFindings:
     meta_field_issues:     list = field(default_factory=list)   # list[tuple[int, list[str]]]
     meta_value_issues:     list = field(default_factory=list)   # list[tuple[int, str, Any, Any]]
     meta_index_mismatch:   list = field(default_factory=list)   # list[tuple[int, Any]]
-    coord_mismatches:      list = field(default_factory=list)   # list[tuple[int, f, f, f, f]]
+    coord_mismatches:      list = field(default_factory=list)   # list[tuple[int, float, float, float, float]]
     pano_distance_issues:  list = field(default_factory=list)   # list[tuple[int, float]]
     bad_coords:            list = field(default_factory=list)   # list[tuple[int, str, Any, Any]]
     outside_california:    list = field(default_factory=list)   # list[tuple[int, str, float, float]]
@@ -144,10 +144,11 @@ def load_csv_indices(files):
     for csv_file in files:
         try:
             series = pd.read_csv(csv_file)["index"]
-            bad = pd.to_numeric(series, errors="coerce").isna()
+            numeric = pd.to_numeric(series, errors="coerce")
+            bad = numeric.isna()
             if bad.any():
                 print(f"  WARNING: {bad.sum()} non-integer value(s) in index column of {csv_file.name} — skipping those rows")
-            raw.extend(pd.to_numeric(series, errors="coerce").dropna().astype(int).values.tolist())
+            raw.extend(numeric.dropna().astype(int).values.tolist())
         except Exception as e:
             print(f"  WARNING: Could not read {csv_file.name}: {e}")
     return set(raw), raw
@@ -283,7 +284,7 @@ def _load_csvs(salty_data):
         completed_panoids = load_completed_panoids(completed_files)
         names = ", ".join(csv_file.name for csv_file in completed_files)
         print(f"  completed : {names}")
-        print(f"            → {len(completed_set):,} unique entries")
+        print(f"            -> {len(completed_set):,} unique entries")
     else:
         print("  WARNING: No completed*.csv found")
 
@@ -294,7 +295,7 @@ def _load_csvs(salty_data):
         reject_reasons = load_reject_reasons(rejected_files)
         names = ", ".join(csv_file.name for csv_file in rejected_files)
         print(f"  rejects   : {names}")
-        print(f"            → {len(rejected_set):,} unique entries")
+        print(f"            -> {len(rejected_set):,} unique entries")
     else:
         print("  WARNING: No rejects*.csv found")
 
@@ -313,9 +314,13 @@ def _load_source_csv(source_path):
     if not source_path.exists():
         print(f"  WARNING: --source-csv {source_path} not found, skipping coverage check")
         return None, None
-    source_coords  = load_source_coords(source_path)
+    try:
+        source_coords = load_source_coords(source_path)
+    except Exception as e:
+        print(f"  WARNING: Could not load --source-csv {source_path.name}: {e} — skipping coverage check")
+        return None, None
     source_indices = set(source_coords.keys())
-    print(f"  source    : {source_path.name} → {len(source_indices):,} entries")
+    print(f"  source    : {source_path.name} -> {len(source_indices):,} entries")
     return source_coords, source_indices
 
 
@@ -354,7 +359,7 @@ def _scan_all_folders(folders, has_metadata_dir, metadata_dir, source_coords, co
             if folder_result is None:
                 continue
 
-            # Boolean flags → list entries
+            # Boolean flags -> list entries
             if folder_result["empty"]:
                 findings.empty_folders.append(folder_result["idx"])
             if folder_result["incomplete"]:
@@ -407,7 +412,7 @@ def _compute_derived(findings, csv_data, disk_indices, has_metadata_dir, metadat
         attempted = csv_data["completed_set"] | csv_data["rejected_set"]
         derived.never_tried = source_indices - attempted
 
-    derived.folders_not_in_completed = disk_indices - csv_data["completed_set"]
+    derived.folders_not_in_completed = disk_indices - csv_data["completed_set"] - csv_data["rejected_set"]
     derived.completed_without_folder = csv_data["completed_set"] - disk_indices
 
     completed_counts = Counter(csv_data["completed_raw"])
@@ -559,7 +564,7 @@ _DETAIL_SPECS = [
     (
         "Duplicate panoids — same panorama used by multiple locations",
         lambda _, d: sorted(d.duplicate_panoids.items()),
-        lambda x: f"{x[0]}  → indices {sorted(x[1])[:5]}{'...' if len(x[1]) > 5 else ''}",
+        lambda x: f"{x[0]}  -> indices {sorted(x[1])[:5]}{'...' if len(x[1]) > 5 else ''}",
     ),
     (
         "Unexpected files in image folders",
@@ -572,7 +577,7 @@ _DETAIL_SPECS = [
         lambda x: str(x),
     ),
     (
-        "Image folders not in any completed CSV",
+        "Unaccounted image folders (not in completed or rejected)",
         lambda _, d: sorted(d.folders_not_in_completed),
         lambda x: f"{x:06d}",
     ),
@@ -606,7 +611,7 @@ _DETAIL_SPECS = [
 
 # ---------------------------------------------------------------------------
 # Flagged export table — drives flagged.txt section building
-# Each entry: (label, entries_fn(findings, derived) → list[tuple[int, str]])
+# Each entry: (label, entries_fn(findings, derived) -> list[tuple[int, str]])
 # ---------------------------------------------------------------------------
 
 _EXPORT_SPECS = [
@@ -696,7 +701,7 @@ _EXPORT_SPECS = [
     ),
     (
         "folders_not_in_completed",
-        lambda _, d: [(idx, "image folder not in CSV") for idx in sorted(d.folders_not_in_completed)],
+        lambda _, d: [(idx, "unaccounted image folder (not in completed or rejected)") for idx in sorted(d.folders_not_in_completed)],
     ),
     (
         "orphan_meta",
@@ -725,10 +730,6 @@ _EXPORT_SPECS = [
     (
         "unexpected_files",
         lambda f, _: [(x[0], x[1]) for x in f.unexpected_files],
-    ),
-    (
-        "never_tried",
-        lambda _, d: [(idx, "never attempted") for idx in sorted(d.never_tried)],
     ),
     (
         "duplicate_completed",
@@ -848,7 +849,7 @@ def _print_report(findings, derived, disk_indices, has_metadata_dir, rejected_co
     n5_bad = len(derived.folders_not_in_completed) + len(derived.completed_without_folder)
     issues += n5_bad
     tag5    = "PASS" if n5_bad == 0 else "FAIL"
-    print(f"[5] Completed <-> images match            : {tag5} — {len(derived.folders_not_in_completed):,} folders not in completed / {len(derived.completed_without_folder):,} completed without folder")
+    print(f"[5] Completed <-> images match            : {tag5} — {len(derived.folders_not_in_completed):,} unaccounted folders / {len(derived.completed_without_folder):,} completed without folder")
 
     # [6] Additional checks
     n6_bad = len(derived.duplicate_completed) + len(derived.in_both) + len(derived.duplicate_panoids)
@@ -905,20 +906,23 @@ def _init_worker(source_coords, completed_panoids):
 
 def _check_images(folder, idx, result):
     """Check all images in a location folder. Mutates result in place."""
-    # Single directory listing — split into jpg and non-jpg in one pass
-    all_files = list(folder.iterdir())
-    jpg_files = sorted(f for f in all_files if f.is_file() and f.suffix.lower() == ".jpg")
-    present   = {f.name for f in jpg_files}
+    # Single directory listing — classify into jpg vs unexpected in one pass
+    jpg_files = []
+    for f in folder.iterdir():
+        if not f.is_file():
+            continue
+        if f.suffix.lower() == ".jpg":
+            jpg_files.append(f)
+        else:
+            result["unexpected_files"].append((idx, f.name))
+    jpg_files.sort(key=lambda p: p.name)
+    present = {f.name for f in jpg_files}
 
     missing = EXPECTED_IMAGES - present
     if not present:
         result["empty"] = True
     elif missing:
         result["incomplete"] = (idx, sorted(missing))
-
-    for f in all_files:
-        if f.is_file() and f.suffix.lower() != ".jpg":
-            result["unexpected_files"].append((idx, f.name))
 
     view_hashes = {}
     for img_path in jpg_files:
@@ -1016,8 +1020,12 @@ def _check_metadata(meta_path, idx, source_coords, completed_panoids, result):
             except (ValueError, TypeError):
                 result["meta_value_issues"].append((idx, "view_fov", EXPECTED_VIEW_FOV, meta["view_fov"]))
 
-        if "index" in meta and int(meta["index"]) != idx:
-            result["meta_index_mismatch"] = (idx, meta["index"])
+        if "index" in meta:
+            try:
+                if int(meta["index"]) != idx:
+                    result["meta_index_mismatch"] = (idx, meta["index"])
+            except (TypeError, ValueError):
+                result["meta_index_mismatch"] = (idx, meta["index"])
 
         if "panoid" in meta and meta["panoid"]:
             result["panoid"] = meta["panoid"]
