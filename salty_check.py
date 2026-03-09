@@ -196,8 +196,7 @@ def write_flagged_export(path, sections):
     total = 0
     lines = [
         f"# SALTY flagged locations — {date.today()}",
-        "# DELETE lines you want to KEEP in completed.csv.",
-        "# Lines you leave will be rejected by salty_reject.py.",
+        "# Entries are commented out by default (safe). Remove the leading '# ' to reject.",
         "# Run: uv run salty_reject.py <data_dir> --from-file flagged.txt",
     ]
     for label, entries in sections:
@@ -206,7 +205,7 @@ def write_flagged_export(path, sections):
         lines.append("#")
         lines.append(f"# --- {label} ({len(entries):,}) ---")
         for idx, detail in entries:
-            lines.append(f"{idx:06d}  # {label}: {detail}")
+            lines.append(f"# {idx:06d}  # {label}: {detail}")
             total += 1
     if total == 0:
         return 0
