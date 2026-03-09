@@ -11,7 +11,10 @@ __pycache__/
 
 # Scraper output directories
 test_output/
-salty_data/
+salty_data_100k/
+salty_data_205k/
+100k-205k_data.csv
+prep_205k.ipynb
 
 # Logs
 *.log
