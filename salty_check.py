@@ -961,10 +961,10 @@ def _check_images(folder, idx, result):
                 w, h = img.size
                 if (w, h) != (1024, 1024):
                     result["bad_dimensions"].append((idx, img_path.name, f"{w}x{h}"))
-                else:
-                    result["images_ok"] += 1
                 if img.mode != "RGB":
                     result["bad_color_mode"].append((idx, img_path.name, img.mode))
+                if (w, h) == (1024, 1024) and img.mode == "RGB":
+                    result["images_ok"] += 1
                 # uint8 view — zero-copy buffer from PIL; std on 3MB vs 12MB float32.
                 arr_u8 = np.asarray(img)
                 std_val = float(arr_u8.std())

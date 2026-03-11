@@ -3,9 +3,12 @@ SALTY Reject Tool
 Moves flagged entries from completed -> rejected with full archive-based undo.
 
 Usage:
+    uv run salty_reject.py <data_dir> [--dry-run]
     uv run salty_reject.py <data_dir> --from-file flagged.txt [--dry-run]
     uv run salty_reject.py <data_dir> --undo --from-file undo_list.txt [--dry-run]
     uv run salty_reject.py <data_dir> --purge [--dry-run]
+
+If --from-file is omitted, <data_dir>/flagged.txt is used automatically.
 """
 
 import argparse
@@ -90,6 +93,18 @@ def _batch_append_to_csv(csv_path, rows):
 def append_to_csv(csv_path, row_dict):
     """Append a single row dict to a CSV. Atomic write via temp file."""
     _batch_append_to_csv(csv_path, [row_dict])
+
+
+def _rejects_csv_for(source_file, data_dir: Path, fallback: Path) -> Path:
+    """Derive the rejects CSV path mirroring a completed CSV.
+    completed_35000.csv -> rejects_35000.csv
+    completed.csv       -> rejects.csv
+    Falls back to rejects.csv if source_file is None.
+    """
+    if source_file is None:
+        return fallback
+    suffix = source_file.stem[len("completed"):]  # e.g. "_35000" or ""
+    return data_dir / f"rejects{suffix}.csv"
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +240,7 @@ def do_reject(data_dir, index_reasons, dry_run):
 
     # Accumulators for batch CSV updates — O(files) instead of O(entries²)
     completed_removals: dict = {}  # Path -> set[int]
-    rejects_rows: list = []
+    rejects_by_source: dict = {}   # source_file (or None) -> list[dict]
 
     for idx, reason in index_reasons:
         idx_str = f"{idx:06d}"
@@ -274,7 +289,8 @@ def do_reject(data_dir, index_reasons, dry_run):
             print(f"  [DRY RUN] {idx_str}")
             if has_completed:
                 print(f"    remove from {source_file.name}")
-            print(f"    add to {paths.rejects_csv.name}  (reason: {reason})")
+            target_rejects = _rejects_csv_for(source_file if has_completed else None, data_dir, paths.rejects_csv)
+            print(f"    add to {target_rejects.name}  (reason: {reason})")
             if has_images:
                 print(f"    archive: images/{idx_str}/ -> rejected_archive/images/{idx_str}/")
             if has_metadata:
@@ -304,16 +320,24 @@ def do_reject(data_dir, index_reasons, dry_run):
                     print(f"  WARN {idx_str}: archive destination {dest} already exists — skipping image archive")
                 else:
                     shutil.move(str(img_folder), str(dest))
+                    if not dest.exists():
+                        print(f"  ERROR {idx_str}: image folder move failed — {dest} not found after move")
+                        n_error += 1
+                        continue
             if has_metadata:
                 dest = paths.arch_meta / f"{idx_str}.json"
                 if dest.exists():
                     print(f"  WARN {idx_str}: archive destination {dest} already exists — skipping metadata archive")
                 else:
                     shutil.move(str(meta_json), str(dest))
+                    if not dest.exists():
+                        print(f"  ERROR {idx_str}: metadata move failed — {dest} not found after move")
+                        n_error += 1
+                        continue
             # 3. Collect for batch CSV update (executed after the loop)
             if has_completed:
                 completed_removals.setdefault(source_file, set()).add(idx)
-            rejects_rows.append(rejects_row)
+            rejects_by_source.setdefault(source_file if has_completed else None, []).append(rejects_row)
 
         n_rejected += 1
 
@@ -321,14 +345,15 @@ def do_reject(data_dir, index_reasons, dry_run):
     if not dry_run:
         for source_path, indices in completed_removals.items():
             _batch_remove_from_csv(source_path, indices)
-        if rejects_rows:
+        for src, rows in rejects_by_source.items():
+            target = _rejects_csv_for(src, data_dir, paths.rejects_csv)
             try:
-                _batch_append_to_csv(paths.rejects_csv, rejects_rows)
+                _batch_append_to_csv(target, rows)
             except Exception as e:
-                print(f"\nERROR: could not write to {paths.rejects_csv.name}: {e}")
+                print(f"\nERROR: could not write to {target.name}: {e}")
                 print(f"Files archived and recovery records written — run --undo to restore.")
-                n_error = n_rejected
-                n_rejected = 0
+                n_error += len(rows)
+                n_rejected -= len(rows)
 
     print()
     prefix = "[DRY RUN] " if dry_run else ""
@@ -541,8 +566,13 @@ def main():
         return
 
     if not args.from_file:
-        print("ERROR: --from-file is required for reject/undo modes")
-        sys.exit(1)
+        default = data_dir / "flagged.txt"
+        if default.exists():
+            print(f"No --from-file specified, using {default}")
+            args.from_file = str(default)
+        else:
+            print("ERROR: --from-file is required for reject/undo modes (no flagged.txt found in data_dir)")
+            sys.exit(1)
 
     from_file = Path(args.from_file)
     if not from_file.exists():

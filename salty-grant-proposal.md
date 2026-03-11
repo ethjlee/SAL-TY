@@ -1,6 +1,5 @@
 # **Project SALTY: A Multi-Modal Framework for High-Precision Geospatial Localization**
 
-**Principal Investigator:** \[Your Name\]  
 **Project Title:** Street-view Attention Learning Telemetry (SALTY)  
 **Submission Date:** February 2026
 **Domain:** Computer Vision / Geospatial Machine Learning / AI Safety & Interpretability
