@@ -15,6 +15,7 @@ salty_data_100k/
 salty_data_205k/
 100k-205k_data.csv
 prep_205k.ipynb
+salty_data/
 
 # Logs
 *.log
@@ -37,3 +38,7 @@ debug_*.py
 
 # Docker
 compose.yml
+gluetun/
+
+# Claude
+SKILL.md

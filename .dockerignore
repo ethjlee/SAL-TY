@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+.git/
+.ipynb_checkpoints/
+*.ipynb
+*.csv
+salty_data*/
+gluetun/
+.env*
+*.log
+*.md
