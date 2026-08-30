@@ -58,8 +58,8 @@ from tqdm import tqdm
 # Configuration
 # ---------------------------------------------------------------------------
 
-COORDS_FILE = "205k-300k_data.csv"
-OUTPUT_DIR  = Path("salty_data")
+COORDS_FILE = "0-100k_data.csv"
+OUTPUT_DIR = Path("salty_data")
 
 PANO_ZOOM   = 4      # Zoom level for downloading equirectangular panorama
 VIEW_HEIGHT = 1024   # Height of extracted perspective views
