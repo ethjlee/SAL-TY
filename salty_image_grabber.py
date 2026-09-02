@@ -58,7 +58,7 @@ from tqdm import tqdm
 # Configuration
 # ---------------------------------------------------------------------------
 
-COORDS_FILE = "0-100k_data.csv"
+COORDS_FILE = "100k-205k_data.csv"
 OUTPUT_DIR = Path("salty_data")
 
 PANO_ZOOM   = 4      # Zoom level for downloading equirectangular panorama
@@ -561,6 +561,7 @@ def main():
 
     success_count = error_count = processed = 0
     consecutive_timeouts = consecutive_errors = 0
+    progress_started = time.monotonic()
 
     with tqdm(
         total=remaining,
@@ -568,7 +569,12 @@ def main():
         leave=True,
         miniters=1,
         mininterval=0,
-        bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}, {postfix}]",
+        smoothing=0.3,
+        unit="loc",
+        bar_format=(
+            "{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} "
+            "[{elapsed}<{remaining}, current:{rate_inv_fmt}, {postfix}]"
+        ),
     ) as pbar:
 
         for _, row in coords_df.iterrows():
@@ -616,8 +622,15 @@ def main():
                             break
 
             processed += 1
+            elapsed = time.monotonic() - progress_started
+            average_seconds_per_location = elapsed / processed
+            pbar.set_postfix_str(
+                f"✓ {success_count} ✗ {error_count} | "
+                f"success:{success_count / processed * 100:.0f}% | "
+                f"avg:{average_seconds_per_location:.2f} s/loc",
+                refresh=False,
+            )
             pbar.update(1)
-            pbar.set_postfix_str(f"✓ {success_count} ✗ {error_count} | rate:{success_count/processed*100:.0f}%")
 
             if reason not in ("already_completed", "already_rejected"):
                 stealth_sleep()

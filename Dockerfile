@@ -1,5 +1,8 @@
 FROM python:3.13
 
+ENV PYTHONUNBUFFERED=1 \
+    TQDM_POSITION=-1
+
 WORKDIR /app
 
 # Versions pinned to match uv.lock, so the image doesn't silently drift
