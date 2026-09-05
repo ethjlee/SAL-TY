@@ -39,6 +39,7 @@ import os
 import random
 import shutil
 import tempfile
+import threading
 import time
 import traceback
 from dataclasses import dataclass
@@ -51,6 +52,7 @@ import pytorch360convert
 import streetlevel.streetview as streetview
 import torch
 from PIL import Image
+from aiohttp import ClientConnectionError
 from requests.exceptions import ConnectionError, Timeout
 from tqdm import tqdm
 
@@ -58,7 +60,7 @@ from tqdm import tqdm
 # Configuration
 # ---------------------------------------------------------------------------
 
-COORDS_FILE = "100k-205k_data.csv"
+COORDS_FILE = "300k-500k_data.csv"
 OUTPUT_DIR = Path("salty_data")
 
 PANO_ZOOM   = 4      # Zoom level for downloading equirectangular panorama
@@ -72,6 +74,34 @@ MAX_SLEEP = 1.0
 
 MAX_CONSECUTIVE_TIMEOUTS = 5   # Terminate after this many consecutive timeouts
 MAX_CONSECUTIVE_ERRORS   = 10  # Terminate after this many consecutive errors (likely IP ban)
+
+
+class ProgressWatchdog:
+    """Exit unsuccessfully if one operation stops making progress for too long."""
+
+    def __init__(self, timeout):
+        if timeout <= 0 or not np.isfinite(timeout):
+            raise ValueError("STALL_TIMEOUT_SECONDS must be a positive finite number")
+        self.timeout = timeout
+        self.last_progress = time.monotonic()
+        self.stopped = threading.Event()
+
+    def touch(self):
+        self.last_progress = time.monotonic()
+
+    def _watch(self):
+        while not self.stopped.wait(min(1.0, self.timeout / 4)):
+            if time.monotonic() - self.last_progress >= self.timeout:
+                # Avoid Python logging locks and cleanup that may themselves be stuck.
+                os.write(2, b"ERROR: scraper stalled; exiting for automatic restart.\n")
+                os._exit(1)
+
+    def __enter__(self):
+        threading.Thread(target=self._watch, daemon=True).start()
+        return self
+
+    def __exit__(self, *exc):
+        self.stopped.set()
 
 
 # ---------------------------------------------------------------------------
@@ -106,11 +136,8 @@ def _load_index_set(csv_path):
     """Load a set of integer indices from a CSV's 'index' column."""
     if not csv_path.exists():
         return set()
-    try:
-        df = pd.read_csv(csv_path)
-        return set(pd.to_numeric(df["index"], errors="coerce").dropna().astype(int))
-    except Exception:
-        return set()
+    df = pd.read_csv(csv_path)
+    return set(pd.to_numeric(df["index"], errors="raise").astype(int))
 
 
 def _write_csv_row(csv_path, row_dict):
@@ -313,7 +340,7 @@ def download_location(row, completed, rejected, paths):
         logging.info(f"[{idx}] Downloaded 4 views (panoid: {pano.id})")
         return True, None
 
-    except (Timeout, ConnectionError) as e:
+    except (Timeout, ConnectionError, TimeoutError, ClientConnectionError) as e:
         logging.warning(f"[{idx}] Network error (timeout/connection): {e}")
         save_reject(idx, lat, lon, "network_timeout", paths)
         return False, "timeout"
@@ -336,14 +363,17 @@ def download_location(row, completed, rejected, paths):
 # Metadata backfill
 # ---------------------------------------------------------------------------
 
-def backfill_metadata(paths, coords_df):
+def backfill_metadata(paths, coords_df, watchdog=None):
     """
-    Check all existing metadata JSON files and backfill new fields
+    Check this batch's existing metadata JSON files and backfill new fields
     (heading, pitch, roll, etc.) for any that are missing them.
     Files already containing all fields are skipped instantly.
     Corrupt JSON files are repaired by looking up coordinates from the CSV.
     """
-    metadata_files = sorted(paths.metadata.glob("*.json"))
+    metadata_files = sorted(
+        path for idx in coords_df.iloc[:, 0]
+        if (path := paths.metadata / f"{int(idx):06d}.json").exists()
+    )
     if not metadata_files:
         return True
 
@@ -352,6 +382,7 @@ def backfill_metadata(paths, coords_df):
 
     n_updated = n_repaired = 0
     consecutive_errors = 0
+    n_errors = 0
 
     api_fields    = ["heading", "pitch", "roll", "street_names", "address", "country_code"]
     config_fields = {
@@ -363,6 +394,8 @@ def backfill_metadata(paths, coords_df):
 
     with tqdm(total=len(metadata_files), desc="Backfill Metadata") as pbar:
         for meta_path in metadata_files:
+            if watchdog is not None:
+                watchdog.touch()
             made_api_call = False
             try:
                 # Try to parse the JSON
@@ -407,6 +440,7 @@ def backfill_metadata(paths, coords_df):
                 # Check which fields are missing
                 missing = [f for f in all_backfill_fields if f not in metadata]
                 if not missing:
+                    consecutive_errors = 0
                     pbar.update(1)
                     continue
 
@@ -447,6 +481,7 @@ def backfill_metadata(paths, coords_df):
                     time.sleep(random.uniform(MIN_SLEEP, MAX_SLEEP))
 
             except Exception as e:
+                n_errors += 1
                 logging.warning(f"Backfill error for {meta_path.name}: {e}")
                 consecutive_errors += 1
                 pbar.update(1)
@@ -458,7 +493,7 @@ def backfill_metadata(paths, coords_df):
 
     print(f"Backfill complete: {n_updated} updated, {n_repaired} repaired")
     logging.info(f"Backfill complete: {n_updated} updated, {n_repaired} repaired out of {len(metadata_files)} files")
-    return True
+    return n_errors == 0
 
 
 # ---------------------------------------------------------------------------
@@ -477,6 +512,8 @@ def parse_args():
                         help="First coordinate index to process (inclusive, default: 0)")
     parser.add_argument("--end-index", type=int, default=None,
                         help="Last coordinate index to process (inclusive, default: all)")
+    parser.add_argument("--backfill-only", action="store_true",
+                        help="Backfill this batch's existing metadata and exit without scraping")
     return parser.parse_args()
 
 
@@ -484,7 +521,7 @@ def parse_args():
 # Entry point
 # ---------------------------------------------------------------------------
 
-def main():
+def main(watchdog=None):
     args = parse_args()
 
     paths = _Paths.from_output_dir(OUTPUT_DIR, shard=args.start_index)
@@ -505,10 +542,6 @@ def main():
     coords_df = pd.read_csv(COORDS_FILE)
     logging.info(f"Loaded {len(coords_df)} coordinates from {COORDS_FILE}")
 
-    # Keep full coords for backfill — corrupt JSON repair needs to look up any index,
-    # not just those in the current shard's slice.
-    coords_df_full = coords_df
-
     # Slice to assigned row range (for parallel operation)
     # --start-index / --end-index are row positions in the CSV (0-99999),
     # NOT first-column values (which are original source dataset IDs)
@@ -519,17 +552,19 @@ def main():
 
     completed = _load_index_set(paths.completed_csv)
     rejected  = _load_index_set(paths.rejects_csv)
+    batch_indices = set(coords_df.iloc[:, 0].astype(int))
+    completed &= batch_indices
+    rejected &= batch_indices
 
     logging.info(f"Found {len(completed)} completed locations")
     logging.info(f"Found {len(rejected)} rejected locations")
 
-    if not backfill_metadata(paths, coords_df_full):
-        print("Terminating due to backfill failure (network issue?)")
-        return
+    # Backfill is maintenance, not a prerequisite for continuing image downloads.
+    if args.backfill_only:
+        return 0 if backfill_metadata(paths, coords_df, watchdog) else 1
 
     total      = len(coords_df)
-    already_done = len(completed | rejected)
-    remaining = total - already_done
+    remaining = len(batch_indices - completed - rejected)
 
     print(f"Total coordinates: {total:,}")
     print(f"Completed: {len(completed):,}")
@@ -546,7 +581,7 @@ def main():
 
     if remaining == 0:
         print("All locations processed!")
-        return
+        return 0
 
     # Auto-confirmed for unattended/detached operation
     # response = input("Start/resume download? [y/N]: ")
@@ -578,6 +613,8 @@ def main():
     ) as pbar:
 
         for _, row in coords_df.iterrows():
+            if watchdog is not None:
+                watchdog.touch()
             idx = int(row.iloc[0])
 
             if idx in completed or idx in rejected:
@@ -593,7 +630,6 @@ def main():
             else:
                 if reason not in ("already_completed", "already_rejected"):
                     rejected.add(idx)
-
                     if reason in ("no_panorama",) or reason.startswith("qc_failed"):
                         # API responded fine — not a network/error issue
                         consecutive_timeouts = 0
@@ -636,6 +672,15 @@ def main():
                 stealth_sleep()
 
     print()
+    remaining = len(batch_indices - completed - rejected)
+    if remaining:
+        message = f"BATCH INCOMPLETE: {remaining:,} unattempted locations remain; exiting to resume after restart."
+        print(message)
+        logging.error(message)
+        # Avoid hammering an unavailable service on repeated failure restarts.
+        time.sleep(30)
+        return 1
+
     print("=" * 70)
     print("DOWNLOAD COMPLETE")
     print("=" * 70)
@@ -654,7 +699,9 @@ def main():
     logging.info("SALTY scraper completed")
     logging.info(f"Success: {success_count:,} | Rejected: {error_count:,}")
     logging.info("=" * 50)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    with ProgressWatchdog(float(os.environ.get("STALL_TIMEOUT_SECONDS", "120"))) as watchdog:
+        raise SystemExit(main(watchdog))
