@@ -20,6 +20,7 @@ import time
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date
+from decimal import Decimal, InvalidOperation
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from functools import partial
 from math import asin, cos, radians, sin, sqrt
@@ -71,10 +72,6 @@ COORD_TOLERANCE = 0.001
 
 # ITU-R BT.601 luminance weights for fast RGB -> grayscale (avoids second PIL decode)
 _BT601_R, _BT601_G, _BT601_B = 0.299, 0.587, 0.114
-
-# JPEG end-of-image marker for truncation check
-_JPEG_EOI = b"\xff\xd9"
-
 
 # ---------------------------------------------------------------------------
 # Findings containers
@@ -138,17 +135,41 @@ def haversine_m(lat1, lon1, lat2, lon2):
     return 6_371_000 * 2 * asin(sqrt(a))
 
 
+def _parse_index(value):
+    """Parse an integer index without rounding or truncating invalid values."""
+    if isinstance(value, bool):
+        raise ValueError("boolean index")
+    try:
+        number = Decimal(str(value))
+    except InvalidOperation as exc:
+        raise ValueError("invalid index") from exc
+    if not number.is_finite() or number != number.to_integral_value():
+        raise ValueError("non-integer index")
+    return int(number)
+
+
+def _csv_index_values(series, csv_file):
+    """Preserve valid rows while reporting invalid indices consistently."""
+    values = []
+    for value in series:
+        try:
+            values.append(_parse_index(value))
+        except ValueError:
+            values.append(None)
+    bad_count = sum(value is None for value in values)
+    if bad_count:
+        print(f"  WARNING: {bad_count} non-integer value(s) in index column of {csv_file.name} - skipping those rows")
+    return pd.Series(values, index=series.index, dtype=object)
+
+
 def load_csv_indices(files):
     """Load index values from one or more CSVs. Returns (unique set, raw list)."""
     raw = []
     for csv_file in files:
         try:
-            series = pd.read_csv(csv_file)["index"]
-            numeric = pd.to_numeric(series, errors="coerce")
-            bad = numeric.isna()
-            if bad.any():
-                print(f"  WARNING: {bad.sum()} non-integer value(s) in index column of {csv_file.name} — skipping those rows")
-            raw.extend(numeric.dropna().astype(int).values.tolist())
+            series = pd.read_csv(csv_file, dtype={"index": str})["index"]
+            indices = _csv_index_values(series, csv_file)
+            raw.extend(indices.dropna().tolist())
         except Exception as e:
             print(f"  WARNING: Could not read {csv_file.name}: {e}")
     return set(raw), raw
@@ -159,10 +180,12 @@ def load_completed_panoids(files):
     result = {}
     for csv_file in files:
         try:
-            df = pd.read_csv(csv_file)
+            df = pd.read_csv(csv_file, dtype={"index": str})
             if "panoid" in df.columns and "index" in df.columns:
                 sub = df[["index", "panoid"]].dropna(subset=["panoid"])
-                sub = sub.astype({"index": int, "panoid": str})
+                sub = sub.copy()
+                sub["index"] = _csv_index_values(sub["index"], csv_file)
+                sub = sub.dropna(subset=["index"]).astype({"panoid": str})
                 result.update(zip(sub["index"], sub["panoid"]))
         except Exception as e:
             print(f"  WARNING: Could not read panoids from {csv_file.name}: {e}")
@@ -171,8 +194,11 @@ def load_completed_panoids(files):
 
 def load_source_coords(source_path):
     """Load source CSV and return {index: (lat, lon)} dict."""
-    df = pd.read_csv(source_path)
-    idx_col = df.iloc[:, 0].astype(int)
+    df = pd.read_csv(source_path, dtype=str)
+    idx_col = _csv_index_values(df.iloc[:, 0], source_path)
+    valid = idx_col.notna()
+    df = df.loc[valid]
+    idx_col = idx_col.loc[valid]
     lat_col = df.iloc[:, 1].astype(float)
     lon_col = df.iloc[:, 2].astype(float)
     return dict(zip(idx_col, zip(lat_col, lon_col)))
@@ -461,7 +487,7 @@ _DETAIL_SPECS = [
         lambda x: f"{x[0]:06d}/{x[1]}  {x[2]}",
     ),
     (
-        "Truncated JPEGs — missing FFD9 end marker",
+        "Truncated JPEGs — incomplete image data",
         lambda f, _: f.truncated_imgs,
         lambda x: f"{x[0]:06d}/{x[1]}",
     ),
@@ -756,7 +782,7 @@ def _build_export_sections(findings, derived):
 
 
 def _print_report(findings, derived, disk_indices, has_metadata_dir, rejected_count, reject_reasons, source_indices):
-    """Print the Results section. Returns total issue count."""
+    """Print the Results section. Returns (failure count, warning count)."""
     print()
     print("Results")
     print("=" * 60)
@@ -855,13 +881,13 @@ def _print_report(findings, derived, disk_indices, has_metadata_dir, rejected_co
     issues += n6_bad
     print(f"[6] Additional")
     print(f"    Duplicate completed entries           : {len(derived.duplicate_completed):,}")
-    print(f"    Duplicate rejected entries            : {len(derived.duplicate_rejected):,}")
+    print(f"    Duplicate rejected entries (WARN)     : {len(derived.duplicate_rejected):,}")
     print(f"    In BOTH completed AND rejected        : {len(derived.in_both):,}")
     print(f"    Duplicate panoid (same pano, diff loc): {len(derived.duplicate_panoids):,}")
     if has_metadata_dir:
-        print(f"    Orphan metadata (no image folder)     : {len(derived.orphan_meta):,}")
+        print(f"    Orphan metadata (WARN, no folder)     : {len(derived.orphan_meta):,}")
     if findings.unexpected_files:
-        print(f"    Unexpected files in image folders     : {len(findings.unexpected_files):,}")
+        print(f"    Unexpected files in folders (WARN)    : {len(findings.unexpected_files):,}")
     if findings.size_outliers:
         print(f"    File size outliers (WARN)             : {len(findings.size_outliers):,}")
     if reject_reasons:
@@ -881,7 +907,13 @@ def _print_report(findings, derived, disk_indices, has_metadata_dir, rejected_co
         for line in details:
             print(line)
 
-    return issues
+    warnings = (len(derived.duplicate_rejected) + len(findings.unexpected_files)
+                + len(findings.size_outliers))
+    if has_metadata_dir:
+        warnings += len(derived.orphan_meta)
+    if source_indices is not None:
+        warnings += len(derived.never_tried)
+    return issues, warnings
 
 
 # ---------------------------------------------------------------------------
@@ -912,7 +944,7 @@ def _check_images(folder, idx, result):
             continue
         if f.suffix.lower() == ".jpg":
             jpg_files.append(f)
-        else:
+        if f.name not in EXPECTED_IMAGES:
             result["unexpected_files"].append((idx, f.name))
     jpg_files.sort(key=lambda p: p.name)
     present = {f.name for f in jpg_files}
@@ -943,10 +975,6 @@ def _check_images(folder, idx, result):
         elif file_size > MAX_FILE_SIZE:
             result["size_outliers"].append((idx, img_path.name, file_size, "suspiciously large"))
 
-        # Truncated JPEG: valid JPEGs end with FFD9
-        if raw[-2:] != _JPEG_EOI:
-            result["truncated_imgs"].append((idx, img_path.name))
-
         # Duplicate view detection: hash file content
         file_hash = hashlib.md5(raw, usedforsecurity=False).hexdigest()
         if file_hash in view_hashes:
@@ -954,9 +982,12 @@ def _check_images(folder, idx, result):
         else:
             view_hashes[file_hash] = img_path.name
 
-        # PIL validation
+        # Decode the image to detect truncation. A complete JPEG may have
+        # harmless trailing bytes after its end marker.
+        is_jpeg = False
         try:
             with Image.open(io.BytesIO(raw)) as img:
+                is_jpeg = img.format == "JPEG"
                 img.load()
                 w, h = img.size
                 if (w, h) != (1024, 1024):
@@ -967,7 +998,9 @@ def _check_images(folder, idx, result):
                     result["images_ok"] += 1
                 # uint8 view — zero-copy buffer from PIL; std on 3MB vs 12MB float32.
                 arr_u8 = np.asarray(img)
-                std_val = float(arr_u8.std())
+                # A view is blank only if EVERY channel has little spatial detail.
+                # Keep the existing threshold; channel color offsets are not detail.
+                std_val = float(arr_u8.std(axis=(0, 1)).max())
                 if std_val < BLANK_STD_THRESHOLD:
                     result["blank_imgs"].append((idx, img_path.name, round(std_val, 2)))
                 else:
@@ -990,6 +1023,8 @@ def _check_images(folder, idx, result):
                     if blur_score < BLUR_THRESHOLD:
                         result["blurry_imgs"].append((idx, img_path.name, round(blur_score, 2)))
         except Exception as e:
+            if is_jpeg and isinstance(e, OSError) and "truncated" in str(e).lower():
+                result["truncated_imgs"].append((idx, img_path.name))
             result["corrupt_imgs"].append((idx, img_path.name, str(e)))
 
 
@@ -1012,7 +1047,7 @@ def _check_metadata(meta_path, idx, source_coords, completed_panoids, result):
             result["meta_value_issues"].append((idx, "headings", EXPECTED_HEADINGS, meta["headings"]))
         if "view_resolution" in meta and meta["view_resolution"] != EXPECTED_VIEW_RESOLUTION:
             result["meta_value_issues"].append((idx, "view_resolution", EXPECTED_VIEW_RESOLUTION, meta["view_resolution"]))
-        if "view_fov" in meta and meta["view_fov"] is not None:
+        if "view_fov" in meta:
             try:
                 if float(meta["view_fov"]) != EXPECTED_VIEW_FOV:
                     result["meta_value_issues"].append((idx, "view_fov", EXPECTED_VIEW_FOV, meta["view_fov"]))
@@ -1021,13 +1056,21 @@ def _check_metadata(meta_path, idx, source_coords, completed_panoids, result):
 
         if "index" in meta:
             try:
-                if int(meta["index"]) != idx:
+                if _parse_index(meta["index"]) != idx:
                     result["meta_index_mismatch"] = (idx, meta["index"])
             except (TypeError, ValueError):
                 result["meta_index_mismatch"] = (idx, meta["index"])
 
-        if "panoid" in meta and meta["panoid"]:
-            result["panoid"] = meta["panoid"]
+        if "panoid" in meta:
+            panoid = meta["panoid"]
+            if isinstance(panoid, str) and panoid.strip():
+                result["panoid"] = panoid
+            else:
+                result["meta_value_issues"].append((idx, "panoid", "nonempty string", panoid))
+
+        for coord_key in ("pano_lat", "pano_lon", "original_lat", "original_lon"):
+            if coord_key in meta and meta[coord_key] is None:
+                result["meta_value_issues"].append((idx, coord_key, "numeric coordinate", None))
 
         # Copyright check — must contain "Google" to confirm official panorama
         copyright_val = meta.get("copyright", "")
@@ -1185,7 +1228,7 @@ def main():
         findings, csv_data, disk_indices, has_metadata_dir, metadata_dir, source_indices,
     )
 
-    issues = _print_report(
+    issues, warnings = _print_report(
         findings, derived, disk_indices, has_metadata_dir,
         len(csv_data["rejected_set"]), csv_data["reject_reasons"], source_indices,
     )
@@ -1193,7 +1236,12 @@ def main():
     elapsed = time.time() - t0
     print()
     print("=" * 60)
-    print("All checks passed." if issues == 0 else f"{issues:,} issue(s) found.")
+    if issues:
+        print(f"{issues:,} failure(s); {warnings:,} warning(s) found.")
+    elif warnings:
+        print(f"No failures; {warnings:,} warning(s) found.")
+    else:
+        print("All checks passed.")
     print(f"Completed in {elapsed:.1f}s")
 
     if not args.no_export:
