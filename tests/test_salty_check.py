@@ -409,6 +409,45 @@ class CheckerTests(unittest.TestCase):
         self.assertFalse(findings.missing_meta)
         self.assertFalse(findings.corrupt_meta)
 
+    def test_tar_order_matches_first_file_or_empty_directory_header(self):
+        archive_path = self.write_archive([
+            ("images/000001", None),
+            ("images/000002", None),
+            ("images/000003", None),
+            ("images/000003/000.jpg", b"third-first"),
+            ("images/000002/000.jpg", b"second-last"),
+        ])
+        with contextlib.redirect_stderr(io.StringIO()):
+            indexed = checker._index_tar_archive(archive_path)
+        self.assertEqual([folder.idx for folder in indexed.folders], [1, 3, 2])
+
+    def test_filesystem_batches_keep_batch_local_csv_checks(self):
+        source_coords = {}
+        completed_panoids = {}
+        for idx in range(1, 18):
+            source_coords[idx] = (37.0, -122.0)
+            completed_panoids[idx] = "test-pano" if idx == 1 else f"test-pano-{idx}"
+            if idx == 1:
+                continue
+            (self.root / "images" / f"{idx:06d}").mkdir()
+            meta = dict(self.base_meta, index=idx, panoid=f"test-pano-{idx}")
+            (self.metadata / f"{idx:06d}.json").write_text(json.dumps(meta))
+
+        # Both mismatches are in the second 16-location batch.
+        completed_panoids[17] = "different-panoid"
+        source_coords[17] = (38.0, -122.0)
+        folders, _ = checker._collect_folders(self.root / "images")
+        findings = checker._scan_all_folders(
+            folders, True, self.metadata, source_coords, completed_panoids, 2,
+        )
+        self.assertEqual(set(findings.empty_folders), set(range(1, 18)))
+        self.assertEqual(findings.panoid_csv_mismatches, [
+            (17, "different-panoid", "test-pano-17"),
+        ])
+        self.assertEqual(findings.coord_mismatches, [
+            (17, 37.0, -122.0, 38.0, -122.0),
+        ])
+
     def test_tar_root_selection_prefers_score_then_depth_then_image_order(self):
         cases = [
             (

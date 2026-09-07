@@ -21,11 +21,10 @@ import tarfile
 import time
 from array import array
 from collections import Counter
-from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, as_completed, wait
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal, InvalidOperation
-from functools import partial
 from itertools import batched
 from math import asin, cos, radians, sin, sqrt
 from pathlib import Path, PurePosixPath
@@ -76,9 +75,9 @@ CA_LON_MIN, CA_LON_MAX = -124.6, -114.0
 # Coordinate comparison tolerance — ~111m at equator
 COORD_TOLERANCE = 0.001
 
-# Archive locations sent to a worker per process-pool task. Batching cuts IPC
+# Locations sent to a worker per process-pool task. Batching cuts IPC
 # overhead while keeping only a small amount of work queued at once.
-ARCHIVE_BATCH_SIZE = 16
+SCAN_BATCH_SIZE = 16
 
 # ITU-R BT.601 luminance weights for fast RGB -> grayscale (avoids second PIL decode)
 _BT601_R, _BT601_G, _BT601_B = 0.299, 0.587, 0.114
@@ -542,6 +541,14 @@ def _load_csv_file_lists(completed_files, rejected_files):
 
 def _tar_parts(name):
     """Return safe, normalized POSIX member-name components."""
+    raw_parts = name.split("/")
+    if raw_parts and raw_parts[0] and all(
+        part not in ("", ".", "..") for part in raw_parts
+    ):
+        return tuple(raw_parts)
+
+    # Preserve PurePosixPath normalization for unusual names while keeping
+    # the common archive path free of per-member Path object allocation.
     parts = tuple(part for part in PurePosixPath(name).parts if part not in (".", "/"))
     if not parts or ".." in parts:
         return None
@@ -651,15 +658,18 @@ def _index_tar_archive(archive_path):
         if info.isdir() and parts[-1] == "metadata":
             builder_for(parts[:-1]).has_metadata_dir = True
         elif info.isfile():
-            member = ArchiveMember(parts[-1], info.offset_data, info.size)
             if len(parts) >= 2 and parts[-2] == "metadata":
                 builder_for(parts[:-2]).add_metadata_file(
                     parts[-1], info.offset_data, info.size,
                 )
-            elif PurePosixPath(parts[-1]).match("completed*.csv"):
-                builder_for(parts[:-1]).completed_members.append(member)
-            elif PurePosixPath(parts[-1]).match("rejects*.csv"):
-                builder_for(parts[:-1]).rejected_members.append(member)
+            elif parts[-1].startswith("completed") and parts[-1].endswith(".csv"):
+                builder_for(parts[:-1]).completed_members.append(
+                    ArchiveMember(parts[-1], info.offset_data, info.size),
+                )
+            elif parts[-1].startswith("rejects") and parts[-1].endswith(".csv"):
+                builder_for(parts[:-1]).rejected_members.append(
+                    ArchiveMember(parts[-1], info.offset_data, info.size),
+                )
 
     candidates = [builder for builder in builders.values() if builder.score]
     if not candidates:
@@ -767,57 +777,93 @@ def _merge_folder_result(findings, folder_result):
         target.extend(folder_result[key])
 
 
-def _scan_all_folders(folders, has_metadata_dir, metadata_dir, source_coords, completed_panoids, n_workers):
-    """Run parallel folder scan. Returns consolidated ScanFindings."""
-    findings = ScanFindings()
+def _batch_lookups(batch, source_coords, completed_panoids):
+    """Return only the CSV lookup entries needed by one folder batch."""
+    indices = []
+    for folder in batch:
+        try:
+            indices.append(folder.idx)
+        except AttributeError:
+            try:
+                indices.append(int(folder.name))
+            except ValueError:
+                pass
+    source_batch = None
+    if source_coords:
+        source_batch = {idx: source_coords[idx] for idx in indices if idx in source_coords}
+    panoid_batch = {}
+    if completed_panoids:
+        panoid_batch = {
+            idx: completed_panoids[idx] for idx in indices if idx in completed_panoids
+        }
+    return source_batch, panoid_batch
 
-    worker = partial(_process_folder, has_metadata_dir=has_metadata_dir, metadata_dir=metadata_dir)
+
+def _collect_batched_scan(folders, submit_batch, n_workers):
+    """Collect a bounded set of process-pool batches into ScanFindings."""
+    findings = ScanFindings()
+    batch_iter = iter(batched(folders, SCAN_BATCH_SIZE))
+    max_pending = max(1, n_workers * 2)
+    pending = set()
+
+    for batch in batch_iter:
+        pending.add(submit_batch(batch))
+        if len(pending) >= max_pending:
+            break
+
+    with tqdm(total=len(folders), desc="Scanning", unit="loc", smoothing=0.3) as progress:
+        while pending:
+            done, pending = wait(pending, return_when=FIRST_COMPLETED)
+            for future in done:
+                batch_results = future.result()
+                for folder_result in batch_results:
+                    _merge_folder_result(findings, folder_result)
+                progress.update(len(batch_results))
+                try:
+                    batch = next(batch_iter)
+                except StopIteration:
+                    continue
+                pending.add(submit_batch(batch))
+    return findings
+
+
+def _scan_all_folders(folders, has_metadata_dir, metadata_dir, source_coords, completed_panoids, n_workers):
+    """Run a bounded, batched parallel filesystem scan."""
 
     with ProcessPoolExecutor(
         max_workers=n_workers,
         initializer=_init_worker,
-        initargs=(source_coords, completed_panoids),
+        initargs=(None, None),
     ) as executor:
-        futures = [executor.submit(worker, folder) for folder in folders]
-        for future in tqdm(
-            as_completed(futures),
-            total=len(folders), desc="Scanning", unit="loc", smoothing=0.3,
-        ):
-            _merge_folder_result(findings, future.result())
+        def submit_batch(batch):
+            source_batch, panoid_batch = _batch_lookups(
+                batch, source_coords, completed_panoids,
+            )
+            return executor.submit(
+                _process_folder_batch,
+                batch, has_metadata_dir, metadata_dir, source_batch, panoid_batch,
+            )
 
-    return findings
+        return _collect_batched_scan(folders, submit_batch, n_workers)
 
 
 def _scan_archive_folders(archive_path, folders, has_metadata_dir, source_coords, completed_panoids, n_workers):
-    """Run the parallel folder scan against members of an uncompressed tar."""
-    findings = ScanFindings()
-    batch_iter = iter(batched(folders, ARCHIVE_BATCH_SIZE))
-    max_pending = max(1, n_workers * 2)
+    """Run a bounded, batched scan against an uncompressed tar."""
     with ProcessPoolExecutor(
         max_workers=n_workers,
         initializer=_init_worker,
-        initargs=(source_coords, completed_panoids, archive_path),
+        initargs=(None, None, archive_path),
     ) as executor:
-        pending = set()
-        for batch in batch_iter:
-            pending.add(executor.submit(_process_archive_batch, batch, has_metadata_dir))
-            if len(pending) >= max_pending:
-                break
+        def submit_batch(batch):
+            source_batch, panoid_batch = _batch_lookups(
+                batch, source_coords, completed_panoids,
+            )
+            return executor.submit(
+                _process_archive_batch,
+                batch, has_metadata_dir, source_batch, panoid_batch,
+            )
 
-        with tqdm(total=len(folders), desc="Scanning", unit="loc", smoothing=0.3) as progress:
-            while pending:
-                done, pending = wait(pending, return_when=FIRST_COMPLETED)
-                for future in done:
-                    batch_results = future.result()
-                    for folder_result in batch_results:
-                        _merge_folder_result(findings, folder_result)
-                    progress.update(len(batch_results))
-                    try:
-                        batch = next(batch_iter)
-                    except StopIteration:
-                        continue
-                    pending.add(executor.submit(_process_archive_batch, batch, has_metadata_dir))
-    return findings
+        return _collect_batched_scan(folders, submit_batch, n_workers)
 
 
 def _compute_derived(findings, csv_data, disk_indices, has_metadata_dir, metadata_source, source_indices):
@@ -1317,13 +1363,20 @@ def _print_report(findings, derived, disk_indices, has_metadata_dir, rejected_co
 _source_coords     = None
 _completed_panoids = None
 _archive_file      = None
+_UNSET              = object()
+
+
+def _set_worker_lookups(source_coords, completed_panoids):
+    """Set the lookup subset used by the current worker task."""
+    global _source_coords, _completed_panoids
+    _source_coords = source_coords
+    _completed_panoids = completed_panoids
 
 
 def _init_worker(source_coords, completed_panoids, archive_path=None):
-    """Initialize worker process with shared dicts (set once, not re-pickled per task)."""
-    global _source_coords, _completed_panoids, _archive_file
-    _source_coords     = source_coords
-    _completed_panoids = completed_panoids
+    """Initialize worker lookups and the optional process-local archive handle."""
+    global _archive_file
+    _set_worker_lookups(source_coords, completed_panoids)
     if _archive_file is not None:
         _archive_file.close()
     _archive_file = archive_path.open("rb") if archive_path is not None else None
@@ -1650,8 +1703,25 @@ def _process_archive_folder(folder, has_metadata_dir):
     return result
 
 
-def _process_archive_batch(folders, has_metadata_dir):
+def _process_folder_batch(
+    folders, has_metadata_dir, metadata_dir, source_coords, completed_panoids,
+):
+    """Process a small filesystem batch with batch-local CSV lookups."""
+    _set_worker_lookups(source_coords, completed_panoids)
+    return [
+        _process_folder(folder, has_metadata_dir, metadata_dir) for folder in folders
+    ]
+
+
+def _process_archive_batch(
+    folders, has_metadata_dir, source_coords=_UNSET, completed_panoids=_UNSET,
+):
     """Process a small archive-order batch in one worker invocation."""
+    if source_coords is not _UNSET or completed_panoids is not _UNSET:
+        _set_worker_lookups(
+            _source_coords if source_coords is _UNSET else source_coords,
+            _completed_panoids if completed_panoids is _UNSET else completed_panoids,
+        )
     return [_process_archive_folder(folder, has_metadata_dir) for folder in folders]
 
 
