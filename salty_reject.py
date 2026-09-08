@@ -4,11 +4,26 @@ Moves flagged entries from completed -> rejected with full archive-based undo.
 
 Usage:
     uv run salty_reject.py <data_dir> [--dry-run]
+    uv run salty_reject.py <data_dir> --reject-all-flagged [--dry-run]
     uv run salty_reject.py <data_dir> --from-file flagged.txt [--dry-run]
     uv run salty_reject.py <data_dir> --undo --from-file undo_list.txt [--dry-run]
     uv run salty_reject.py <data_dir> --purge [--dry-run]
 
 If --from-file is omitted, <data_dir>/flagged.txt is used automatically.
+Use --reject-all-flagged to include entries with a leading '#', without editing
+flagged.txt. Headers and notes are ignored; duplicate indices use the first reason.
+Without this option, only uncommented entries are processed.
+Add --dry-run to preview changes. Actual rejection still asks for 'yes' and
+archives entries for undo. --reject-all-flagged also works with --from-file,
+but cannot be combined with --undo or --purge.
+Rejection archives the entire images/<index>/ folder and metadata/<index>.json,
+including all views for that location, and updates its CSV record.
+
+undo_list.txt is an example input filename, NOT an automatically generated file.
+To undo, create a text file with the indices to restore, one per line without '#',
+then pass it with --undo --from-file <file>. Recovery data is stored automatically
+in <data_dir>/rejected_archive/records/<index>.json. Undo skips commented lines;
+the unchanged commented flagged.txt will not select those indices for restoration.
 """
 
 import argparse
@@ -57,6 +72,13 @@ class _Paths:
 # CSV helpers
 # ---------------------------------------------------------------------------
 
+def _write_csv_atomically(csv_path, df):
+    """Replace a CSV with a DataFrame using a temporary file beside it."""
+    tmp = csv_path.with_suffix(".tmp")
+    df.to_csv(tmp, index=False)
+    os.replace(tmp, csv_path)
+
+
 def _batch_remove_from_csv(csv_path, indices):
     """Remove all rows whose 'index' is in indices (set/list). Returns number of rows removed.
     Writes atomically via a temp file. No-op if the file does not contain any matching rows.
@@ -67,9 +89,7 @@ def _batch_remove_from_csv(csv_path, indices):
         mask = pd.to_numeric(df["index"], errors="coerce").isin(indices)
         n = int(mask.sum())
         if n > 0:
-            tmp = csv_path.with_suffix(".tmp")
-            df[~mask].to_csv(tmp, index=False)
-            os.replace(tmp, csv_path)
+            _write_csv_atomically(csv_path, df[~mask])
         return n
     except Exception as e:
         print(f"  WARNING: Could not update {csv_path.name}: {e}")
@@ -85,9 +105,7 @@ def _batch_append_to_csv(csv_path, rows):
         df = pd.concat([pd.read_csv(csv_path), df_new], ignore_index=True)
     else:
         df = df_new
-    tmp = csv_path.with_suffix(".tmp")
-    df.to_csv(tmp, index=False)
-    os.replace(tmp, csv_path)
+    _write_csv_atomically(csv_path, df)
 
 
 def append_to_csv(csv_path, row_dict):
@@ -111,18 +129,27 @@ def _rejects_csv_for(source_file, data_dir: Path, fallback: Path) -> Path:
 # Input parsing
 # ---------------------------------------------------------------------------
 
-def parse_index_file(path):
+def parse_index_file(path, include_commented=False):
     """
     Parse a file of indices (one per line).
     Format: <index>  # optional reason comment
+    With include_commented, also accept commented indices from flagged.txt.
     Returns list of (idx, reason) tuples, deduplicated (first occurrence wins).
     """
     seen = {}
     with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
-            if not line or line.startswith("#"):
+            if not line:
                 continue
+            if line.startswith("#"):
+                if not include_commented:
+                    continue
+                line = line[1:].strip()
+                # Only treat numeric entries as flags, not headers or notes.
+                token = line.split("#", 1)[0].strip()
+                if not (token.isascii() and token.isdigit()):
+                    continue
             parts = line.split("#", 1)
             token = parts[0].strip()
             reason = parts[1].strip() if len(parts) > 1 else "manual_reject"
@@ -139,6 +166,31 @@ def parse_index_file(path):
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _archive_resource(source, dest, idx_str, resource, move_label):
+    """Archive a resource; an existing destination retains the skip behavior."""
+    if dest.exists():
+        print(f"  WARN {idx_str}: archive destination {dest} already exists — skipping {resource} archive")
+    else:
+        shutil.move(str(source), str(dest))
+        if not dest.exists():
+            print(f"  ERROR {idx_str}: {move_label} move failed — {dest} not found after move")
+            return False
+    return True
+
+
+def _restore_resource(source, dest, idx_str, resource, archive_label):
+    """Restore a resource, reporting missing archives and destination conflicts."""
+    if source.exists():
+        if dest.exists():
+            print(f"  WARN {idx_str}: restore destination {dest} already exists — skipping {resource} restore")
+            return False
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(source), str(dest))
+        return True
+    print(f"  WARN {idx_str}: archive {archive_label} not found (purged?)")
+    return False
+
 
 def _load_rejected_set(data_dir):
     """Load all rejected indices from rejects*.csv into a set."""
@@ -315,25 +367,19 @@ def do_reject(data_dir, index_reasons, dry_run):
             record_path.write_text(json.dumps(record, indent=2), encoding="utf-8")
             # 2. Archive files
             if has_images:
-                dest = paths.arch_images / idx_str
-                if dest.exists():
-                    print(f"  WARN {idx_str}: archive destination {dest} already exists — skipping image archive")
-                else:
-                    shutil.move(str(img_folder), str(dest))
-                    if not dest.exists():
-                        print(f"  ERROR {idx_str}: image folder move failed — {dest} not found after move")
-                        n_error += 1
-                        continue
+                if not _archive_resource(
+                    img_folder, paths.arch_images / idx_str, idx_str,
+                    "image", "image folder",
+                ):
+                    n_error += 1
+                    continue
             if has_metadata:
-                dest = paths.arch_meta / f"{idx_str}.json"
-                if dest.exists():
-                    print(f"  WARN {idx_str}: archive destination {dest} already exists — skipping metadata archive")
-                else:
-                    shutil.move(str(meta_json), str(dest))
-                    if not dest.exists():
-                        print(f"  ERROR {idx_str}: metadata move failed — {dest} not found after move")
-                        n_error += 1
-                        continue
+                if not _archive_resource(
+                    meta_json, paths.arch_meta / f"{idx_str}.json", idx_str,
+                    "metadata", "metadata",
+                ):
+                    n_error += 1
+                    continue
             # 3. Collect for batch CSV update (executed after the loop)
             if has_completed:
                 completed_removals.setdefault(source_file, set()).add(idx)
@@ -420,30 +466,18 @@ def do_undo(data_dir, index_reasons, dry_run):
 
         # Restore image folder
         if had_images:
-            if arch_img.exists():
-                dest = paths.images / idx_str
-                if dest.exists():
-                    print(f"  WARN {idx_str}: restore destination {dest} already exists — skipping image restore")
-                    ok = False
-                else:
-                    paths.images.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(arch_img), str(dest))
-            else:
-                print(f"  WARN {idx_str}: archive image folder not found (purged?)")
+            if not _restore_resource(
+                arch_img, paths.images / idx_str, idx_str,
+                "image", "image folder",
+            ):
                 ok = False
 
         # Restore metadata
         if had_metadata:
-            if arch_meta.exists():
-                dest = paths.metadata / f"{idx_str}.json"
-                if dest.exists():
-                    print(f"  WARN {idx_str}: restore destination {dest} already exists — skipping metadata restore")
-                    ok = False
-                else:
-                    paths.metadata.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(arch_meta), str(dest))
-            else:
-                print(f"  WARN {idx_str}: archive metadata JSON not found (purged?)")
+            if not _restore_resource(
+                arch_meta, paths.metadata / f"{idx_str}.json", idx_str,
+                "metadata", "metadata JSON",
+            ):
                 ok = False
 
         # Restore completed row BEFORE removing from rejects — if this fails,
@@ -554,7 +588,11 @@ def main():
                         help="Permanently delete rejected_archive/ (irreversible)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Show what would happen without making any changes")
+    parser.add_argument("--reject-all-flagged", action="store_true",
+                        help="Reject all listed indices, including commented entries in flagged.txt")
     args = parser.parse_args()
+    if args.reject_all_flagged and (args.undo or args.purge):
+        parser.error("--reject-all-flagged cannot be used with --undo or --purge")
 
     data_dir = Path(args.data_dir)
     if not data_dir.exists():
@@ -579,7 +617,7 @@ def main():
         print(f"ERROR: {from_file} not found")
         sys.exit(1)
 
-    index_reasons = parse_index_file(from_file)
+    index_reasons = parse_index_file(from_file, include_commented=args.reject_all_flagged)
     if not index_reasons:
         print("No indices found in file. Nothing to do.")
         return
