@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import pandas as pd
 
@@ -62,6 +63,161 @@ class RejectTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('3 restored', result.stdout)
         self.assertEqual(set(pd.read_csv(csv)['index']), {1, 2, 3, 4})
+        self.assertEqual((self.root / 'reject_list.txt').read_text(), '')
+
+    def test_default_undo_accumulates_and_restores_separate_reject_runs(self):
+        csv = self.root / 'completed.csv'
+        csv.write_text('index,lat,lon,panoid\n1,10,20,pano1\n2,11,21,pano2\n3,12,22,pano3\n')
+
+        self.flags.write_text('1 # first batch\n')
+        first = self.run_cli(answer='yes\n')
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual((self.root / 'reject_list.txt').read_text(), '1\n')
+
+        self.flags.write_text('2 # second batch\n')
+        second = self.run_cli(answer='yes\n')
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual((self.root / 'reject_list.txt').read_text(), '1\n2\n')
+        self.assertEqual(pd.read_csv(csv)['index'].tolist(), [3])
+
+        undone = self.run_cli('--undo', answer='yes\n')
+        self.assertEqual(undone.returncode, 0, undone.stderr)
+        self.assertIn('2 restored', undone.stdout)
+        self.assertEqual(set(pd.read_csv(csv)['index']), {1, 2, 3})
+        self.assertEqual((self.root / 'reject_list.txt').read_text(), '')
+
+    def test_subset_undo_keeps_other_entries_in_automatic_list(self):
+        csv = self.root / 'completed.csv'
+        csv.write_text('index,lat,lon,panoid\n1,10,20,pano1\n2,11,21,pano2\n')
+        self.flags.write_text('1\n2\n')
+        rejected = self.run_cli(answer='yes\n')
+        self.assertEqual(rejected.returncode, 0, rejected.stderr)
+
+        subset = self.root / 'undo_subset.txt'
+        subset.write_text('1\n')
+        restored = self.run_cli('--undo', '--from-file', str(subset), answer='yes\n')
+        self.assertEqual(restored.returncode, 0, restored.stderr)
+        self.assertEqual((self.root / 'reject_list.txt').read_text(), '2\n')
+        self.assertEqual(pd.read_csv(csv)['index'].tolist(), [1])
+
+    def test_purge_clears_automatic_reject_list(self):
+        csv = self.root / 'completed.csv'
+        csv.write_text('index,lat,lon,panoid\n1,10,20,pano1\n')
+        self.flags.write_text('1\n')
+        rejected = self.run_cli(answer='yes\n')
+        self.assertEqual(rejected.returncode, 0, rejected.stderr)
+        self.assertEqual((self.root / 'reject_list.txt').read_text(), '1\n')
+
+        purged = self.run_cli('--purge', answer='PURGE\n')
+        self.assertEqual(purged.returncode, 0, purged.stderr)
+        self.assertFalse((self.root / 'rejected_archive').exists())
+        self.assertEqual((self.root / 'reject_list.txt').read_text(), '')
+
+    def test_reject_list_write_failure_preserves_recovery_record(self):
+        paths = reject._Paths.from_data_dir(self.root)
+        paths.arch_records.mkdir(parents=True)
+        record = paths.arch_records / '000001.json'
+        record.write_text('{}')
+        output = io.StringIO()
+
+        with mock.patch.object(Path, 'write_text', side_effect=OSError('read-only')):
+            with contextlib.redirect_stdout(output):
+                updated = reject._refresh_reject_list(paths)
+
+        self.assertFalse(updated)
+        self.assertTrue(record.exists())
+        self.assertIn('Could not update reject_list.txt', output.getvalue())
+
+    def test_archive_destination_conflict_aborts_entry_without_mutation(self):
+        csv = self.root / 'completed.csv'
+        csv.write_text('index,lat,lon,panoid\n1,10,20,pano1\n')
+        live = self.root / 'images' / '000001'
+        live.mkdir(parents=True)
+        (live / 'live.jpg').write_bytes(b'live')
+        archived = self.root / 'rejected_archive' / 'images' / '000001'
+        archived.mkdir(parents=True)
+        (archived / 'old.jpg').write_bytes(b'old')
+        self.flags.write_text('1\n')
+
+        result = self.run_cli(answer='yes\n')
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('archive destination', result.stdout)
+        self.assertEqual(pd.read_csv(csv)['index'].tolist(), [1])
+        self.assertTrue((live / 'live.jpg').exists())
+        self.assertFalse((self.root / 'rejected_archive' / 'records' / '000001.json').exists())
+        self.assertFalse((self.root / 'rejects.csv').exists())
+
+    def test_reject_csv_removal_failure_does_not_add_reject(self):
+        csv = self.root / 'completed.csv'
+        csv.write_text('index,lat,lon,panoid\n1,10,20,pano1\n')
+
+        with mock.patch.object(reject, '_batch_remove_from_csv', return_value=None):
+            reject.do_reject(self.root, [(1, 'test')], dry_run=False)
+
+        self.assertEqual(pd.read_csv(csv)['index'].tolist(), [1])
+        self.assertFalse((self.root / 'rejects.csv').exists())
+        self.assertTrue((self.root / 'rejected_archive' / 'records' / '000001.json').exists())
+
+    def test_failed_rejects_cleanup_preserves_record_and_retry_is_idempotent(self):
+        csv = self.root / 'completed.csv'
+        csv.write_text('index,lat,lon,panoid\n1,10,20,pano1\n')
+        reject.do_reject(self.root, [(1, 'test')], dry_run=False)
+        record = self.root / 'rejected_archive' / 'records' / '000001.json'
+
+        with mock.patch.object(reject, '_batch_remove_from_csv', return_value=None):
+            reject.do_undo(self.root, [(1, '')], dry_run=False)
+
+        self.assertTrue(record.exists())
+        self.assertEqual(pd.read_csv(csv)['index'].tolist(), [1])
+        self.assertEqual(pd.read_csv(self.root / 'rejects.csv')['index'].tolist(), [1])
+
+        reject.do_undo(self.root, [(1, '')], dry_run=False)
+        self.assertFalse(record.exists())
+        self.assertEqual(pd.read_csv(csv)['index'].tolist(), [1])
+        self.assertTrue(pd.read_csv(self.root / 'rejects.csv').empty)
+
+    def test_partial_restore_does_not_append_completed_row_and_can_retry(self):
+        csv = self.root / 'completed.csv'
+        csv.write_text('index,lat,lon,panoid\n1,10,20,pano1\n')
+        image = self.root / 'images' / '000001' / 'view.jpg'
+        image.parent.mkdir(parents=True)
+        image.write_bytes(b'image')
+        metadata = self.root / 'metadata' / '000001.json'
+        metadata.parent.mkdir(parents=True)
+        metadata.write_text('{"original_lat":10,"original_lon":20,"panoid":"pano1"}')
+        reject.do_reject(self.root, [(1, 'test')], dry_run=False)
+
+        metadata.write_text('conflict')
+        reject.do_undo(self.root, [(1, '')], dry_run=False)
+
+        record = self.root / 'rejected_archive' / 'records' / '000001.json'
+        self.assertTrue(record.exists())
+        self.assertTrue(pd.read_csv(csv).empty)
+
+        metadata.unlink()
+        reject.do_undo(self.root, [(1, '')], dry_run=False)
+        self.assertFalse(record.exists())
+        self.assertEqual(pd.read_csv(csv)['index'].tolist(), [1])
+
+    def test_bare_undo_supports_legacy_records_without_a_reject_list(self):
+        (self.root / 'completed.csv').write_text('index,lat,lon,panoid\n')
+        (self.root / 'rejects.csv').write_text(
+            'timestamp,index,lat,lon,reason,panoid\nnow,1,10,20,old,pano1\n'
+        )
+        records = self.root / 'rejected_archive' / 'records'
+        records.mkdir(parents=True)
+        (records / '000001.json').write_text(
+            '{"completed_row":{"index":1,"lat":10,"lon":20,"panoid":"pano1"},'
+            '"completed_source_file":"completed.csv","had_completed_row":true,'
+            '"had_images":false,"had_metadata":false}'
+        )
+
+        restored = self.run_cli('--undo', answer='yes\n')
+        self.assertEqual(restored.returncode, 0, restored.stderr)
+        self.assertIn('using archived recovery records', restored.stdout)
+        self.assertEqual(pd.read_csv(self.root / 'completed.csv')['index'].tolist(), [1])
+        self.assertEqual((self.root / 'reject_list.txt').read_text(), '')
 
     def snapshot(self):
         return {
@@ -116,7 +272,7 @@ class RejectTests(unittest.TestCase):
         expected = {name: data for name, data in original.items()
                     if name not in moved and name not in csv_names}
         expected.update({'rejected_archive/' + name: original[name] for name in moved})
-        bookkeeping = csv_names | {'rejects.csv', 'rejects_100.csv',
+        bookkeeping = csv_names | {'rejects.csv', 'rejects_100.csv', 'reject_list.txt',
                                   'rejected_archive/records/000001.json',
                                   'rejected_archive/records/000002.json'}
         self.assertEqual({name: data for name, data in after.items() if name not in bookkeeping}, expected)
@@ -130,7 +286,7 @@ class RejectTests(unittest.TestCase):
         self.assertIn('2 skipped', result.stdout)
         self.assertEqual(self.snapshot(), after)
 
-        undo = self.root / 'undo_list.txt'
+        undo = self.root / 'undo_subset.txt'
         undo.write_text('1\n2\n')
         before_undo = self.snapshot()
         result = self.run_cli('--undo', '--from-file', str(undo), '--dry-run')
@@ -140,7 +296,7 @@ class RejectTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('2 restored', result.stdout)
         restored = self.snapshot()
-        extras = {'undo_list.txt', 'rejects.csv', 'rejects_100.csv'}
+        extras = {'reject_list.txt', 'undo_subset.txt', 'rejects.csv', 'rejects_100.csv'}
         self.assertEqual({name: data for name, data in restored.items()
                           if name not in csv_names | extras},
                          {name: data for name, data in original.items() if name not in csv_names})
@@ -160,6 +316,10 @@ class RejectTests(unittest.TestCase):
                 result = self.run_cli('--reject-all-flagged', mode)
                 self.assertEqual(result.returncode, 2)
                 self.assertIn('cannot be used', result.stderr)
+
+        result = self.run_cli('--undo', '--purge')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('not allowed with argument', result.stderr)
 
 
 if __name__ == '__main__':

@@ -1,0 +1,191 @@
+[
+  {
+    "path": "salty_data_300k/rejected_archive/images/973058/270.jpg",
+    "split": "validation",
+    "stratum": "archive_blank",
+    "panoid_group": "dHlCmrFW76cF0Mgkq4lARg",
+    "label": "degraded",
+    "kind": "dark_low_contrast",
+    "note": "Extremely dark tunnel wall; almost no scene detail."
+  },
+  {
+    "path": "salty_data_300k/rejected_archive/images/552039/090.jpg",
+    "split": "validation",
+    "stratum": "archive_blur",
+    "panoid_group": "DOB_-_uDQUdCnLQ7p8CDdA",
+    "label": "degraded",
+    "kind": "blur",
+    "note": "Almost entire image obscured by strong blur."
+  },
+  {
+    "path": "salty_data_300k/rejected_archive/images/025748/090.jpg",
+    "split": "validation",
+    "stratum": "archive_blur",
+    "panoid_group": "9DJzf4X6BJf0WpkjFPLtWg",
+    "label": "usable",
+    "kind": "fog_water",
+    "note": "Natural fog over water; no evidence of corrupted content."
+  },
+  {
+    "path": "salty_data_100k/rejected_archive/images/599092/270.jpg",
+    "split": "validation",
+    "stratum": "archive_blur",
+    "panoid_group": "pUL-w_94oK7zhctcgLQq3A",
+    "label": "degraded",
+    "kind": "blur",
+    "note": "Almost entire scene blurred; copyright and a little foreground detail survive."
+  },
+  {
+    "path": "salty_data_100k/rejected_archive/images/142040/000.jpg",
+    "split": "validation",
+    "stratum": "archive_blur",
+    "panoid_group": "gU-2RmI513igUdctkJHWBg",
+    "label": "degraded",
+    "kind": "blur",
+    "note": "Visible widespread optical blur/smearing over road and vegetation."
+  },
+  {
+    "path": "salty_data_300k/rejected_archive/images/1019735/000.jpg",
+    "split": "validation",
+    "stratum": "archive_blur",
+    "panoid_group": "6I8w_J78XTd266vBEaHIQA",
+    "label": "degraded",
+    "kind": "blur",
+    "note": "Strong blur and glare obscure landscape details across most of frame."
+  },
+  {
+    "path": "salty_data_100k/rejected_archive/images/1092300/000.jpg",
+    "split": "validation",
+    "stratum": "archive_other_views",
+    "panoid_group": "5iRDa3lNi9yYY23rGrGQwQ",
+    "label": "usable",
+    "kind": "glare",
+    "note": "Sun glare but houses, street, and vegetation remain clearly identifiable."
+  },
+  {
+    "path": "salty_data_100k/rejected_archive/images/273308/090.jpg",
+    "split": "validation",
+    "stratum": "archive_other_views",
+    "panoid_group": "vpSNeRaPzW-Q2liKGmC4BA",
+    "label": "usable",
+    "kind": "clutter",
+    "note": "Detailed truck and landscape; proximity to vehicle is not corruption."
+  },
+  {
+    "path": "salty_data_100k/rejected_archive/images/994889/270.jpg",
+    "split": "validation",
+    "stratum": "archive_other_views",
+    "panoid_group": "G82FxwiLqOcHXHbvFH3Tig",
+    "label": "usable",
+    "kind": "street",
+    "note": "Detailed residential scene."
+  },
+  {
+    "path": "salty_data_205k_upscaled/images/797913/000.jpg",
+    "split": "validation",
+    "stratum": "active_flagged_blur",
+    "panoid_group": "LSQuNZblwtY8ouQCocFPLQ",
+    "label": "usable",
+    "kind": "fog_water",
+    "note": "Natural fog over water with visible shore; preserve."
+  },
+  {
+    "path": "salty_data_205k_upscaled/images/064063/180.jpg",
+    "split": "validation",
+    "stratum": "active_flagged_blur",
+    "panoid_group": "duApetmB_yuQTHp8l6POaA",
+    "label": "degraded",
+    "kind": "blur",
+    "note": "Strong blur and glare across road, trees and houses."
+  },
+  {
+    "path": "salty_data_205k/images/299999/000.jpg",
+    "split": "validation",
+    "stratum": "random_active",
+    "panoid_group": "ik69aiwM_yglCHwxI0E0Jw",
+    "label": "usable",
+    "kind": "glare",
+    "note": "Sun glare but road, fences and distant terrain retain detail."
+  },
+  {
+    "path": "salty_data_100k_upscaled/images/264626/090.jpg",
+    "split": "validation",
+    "stratum": "random_active",
+    "panoid_group": "_y7oI_J2fCOP8DXktJST8Q",
+    "label": "usable",
+    "kind": "desert",
+    "note": "Detailed desert ground below smooth bright sky."
+  },
+  {
+    "path": "salty_data_100k/images/828220/000.jpg",
+    "split": "validation",
+    "stratum": "random_active",
+    "panoid_group": "lLx8Tx2hvZBYdK6O74SLTw",
+    "label": "usable",
+    "kind": "street",
+    "note": "Detailed road and rural landscape."
+  },
+  {
+    "path": "salty_data_100k/images/604791/090.jpg",
+    "split": "validation",
+    "stratum": "random_active",
+    "panoid_group": "7Bi6ua4-itJZH6gUHORNNw",
+    "label": "usable",
+    "kind": "smooth_pavement",
+    "note": "Smooth concrete beside detailed vegetation and distant hills."
+  },
+  {
+    "path": "salty_data_300k/images/1340845/270.jpg",
+    "split": "validation",
+    "stratum": "random_active",
+    "panoid_group": "hRrgF2DaRpq5nK2q1Zaq2g",
+    "label": "usable",
+    "kind": "orchard",
+    "note": "Detailed orchard; small overhead-wire stitching offset does not make image unusable."
+  },
+  {
+    "path": "salty_data_205k_upscaled/images/1290835/270.jpg",
+    "split": "validation",
+    "stratum": "random_active",
+    "panoid_group": "p5BYyq6IDFlUs-xkmqgl2g",
+    "label": "usable",
+    "kind": "desert",
+    "note": "Detailed bright desert ground and hillside."
+  },
+  {
+    "path": "salty_data_205k_upscaled/images/539600/270.jpg",
+    "split": "validation",
+    "stratum": "random_active",
+    "panoid_group": "78nHP059zDVmiM2PXTfdjw",
+    "label": "usable",
+    "kind": "smooth_pavement",
+    "note": "Clear road and orchard under large sky region."
+  },
+  {
+    "path": "salty_data_300k/images/134360/180.jpg",
+    "split": "validation",
+    "stratum": "random_active",
+    "panoid_group": "H25fkGQFSHMqbh8ChW-IBQ",
+    "label": "usable",
+    "kind": "street",
+    "note": "Detailed street with varied lighting."
+  },
+  {
+    "path": "salty_data_100k/images/030193/090.jpg",
+    "split": "validation",
+    "stratum": "random_active",
+    "panoid_group": "c3HqcD0X-QxFeIsxCdtlfA",
+    "label": "usable",
+    "kind": "desert",
+    "note": "Sparse desert with visible vegetation and distant features."
+  },
+  {
+    "path": "salty_data_100k/images/907478/180.jpg",
+    "split": "validation",
+    "stratum": "random_active",
+    "panoid_group": "Tc69UHD1SCZyxaHL_QY_Gw",
+    "label": "usable",
+    "kind": "forest",
+    "note": "Visible detail on trees and track despite relatively soft source imagery."
+  }
+]

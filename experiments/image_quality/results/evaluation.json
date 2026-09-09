@@ -1,0 +1,379 @@
+{
+  "note": "Exploratory evaluation, with agent visual labels. Candidate audit is selected from predictions; not an independent accuracy estimate. Regional v2 is recomputed from saved grids rounded to three decimals.",
+  "images": 915,
+  "sources": {
+    "random_active": 384,
+    "visually_reviewed": 22,
+    "archived_reject": 445,
+    "flagged_active": 64
+  },
+  "labeled_sets": {
+    "development": {
+      "labels": {
+        "degraded": 9,
+        "usable": 10,
+        "borderline": 3
+      },
+      "methods": {
+        "baseline": {
+          "TP": 5,
+          "FP": 1,
+          "FN": 4,
+          "TN": 9
+        },
+        "naive_regional": {
+          "TP": 3,
+          "FP": 2,
+          "FN": 6,
+          "TN": 8
+        },
+        "regional": {
+          "TP": 0,
+          "FP": 0,
+          "FN": 9,
+          "TN": 10
+        },
+        "regional_v2": {
+          "TP": 2,
+          "FP": 0,
+          "FN": 7,
+          "TN": 10
+        },
+        "near_blank": {
+          "TP": 4,
+          "FP": 0,
+          "FN": 5,
+          "TN": 10
+        },
+        "baseline_plus_regional_v2": {
+          "TP": 7,
+          "FP": 1,
+          "FN": 2,
+          "TN": 9
+        },
+        "baseline_plus_both_visual_rules": {
+          "TP": 9,
+          "FP": 1,
+          "FN": 0,
+          "TN": 9
+        }
+      }
+    },
+    "validation": {
+      "labels": {
+        "degraded": 6,
+        "usable": 15
+      },
+      "methods": {
+        "baseline": {
+          "TP": 6,
+          "FP": 2,
+          "FN": 0,
+          "TN": 13
+        },
+        "naive_regional": {
+          "TP": 3,
+          "FP": 1,
+          "FN": 3,
+          "TN": 14
+        },
+        "regional": {
+          "TP": 0,
+          "FP": 0,
+          "FN": 6,
+          "TN": 15
+        },
+        "regional_v2": {
+          "TP": 0,
+          "FP": 0,
+          "FN": 6,
+          "TN": 15
+        },
+        "near_blank": {
+          "TP": 1,
+          "FP": 0,
+          "FN": 5,
+          "TN": 15
+        },
+        "baseline_plus_regional_v2": {
+          "TP": 6,
+          "FP": 2,
+          "FN": 0,
+          "TN": 13
+        },
+        "baseline_plus_both_visual_rules": {
+          "TP": 6,
+          "FP": 2,
+          "FN": 0,
+          "TN": 13
+        }
+      }
+    }
+  },
+  "candidate_audit": {
+    "regional_v2": {
+      "flagged": 32,
+      "labels": {
+        "degraded": 32
+      },
+      "individual_images_passing_baseline": 32,
+      "passing_baseline_and_visually_degraded": 32,
+      "distinct_dataset_folders": 25,
+      "folders_with_baseline_issue_in_sample": 25,
+      "random_active_flags": 0,
+      "counterexamples": [],
+      "paths": [
+        "salty_data_100k/rejected_archive/images/1271837/090.jpg",
+        "salty_data_100k/rejected_archive/images/1271837/270.jpg",
+        "salty_data_100k/rejected_archive/images/207025/000.jpg",
+        "salty_data_100k/rejected_archive/images/207025/180.jpg",
+        "salty_data_100k/rejected_archive/images/273308/180.jpg",
+        "salty_data_100k/rejected_archive/images/377955/180.jpg",
+        "salty_data_100k/rejected_archive/images/599092/000.jpg",
+        "salty_data_100k/rejected_archive/images/650295/270.jpg",
+        "salty_data_100k/rejected_archive/images/695750/000.jpg",
+        "salty_data_100k/rejected_archive/images/925962/180.jpg",
+        "salty_data_205k/images/1356936/000.jpg",
+        "salty_data_205k_upscaled/images/1337935/000.jpg",
+        "salty_data_205k_upscaled/images/1337935/180.jpg",
+        "salty_data_205k_upscaled/images/1356936/000.jpg",
+        "salty_data_205k_upscaled/images/291027/000.jpg",
+        "salty_data_205k_upscaled/images/291027/180.jpg",
+        "salty_data_205k_upscaled/images/674096/000.jpg",
+        "salty_data_205k_upscaled/images/837818/000.jpg",
+        "salty_data_300k/rejected_archive/images/077402/180.jpg",
+        "salty_data_300k/rejected_archive/images/1248603/000.jpg",
+        "salty_data_300k/rejected_archive/images/1485734/180.jpg",
+        "salty_data_300k/rejected_archive/images/201048/000.jpg",
+        "salty_data_300k/rejected_archive/images/201048/180.jpg",
+        "salty_data_300k/rejected_archive/images/312789/000.jpg",
+        "salty_data_300k/rejected_archive/images/312789/180.jpg",
+        "salty_data_300k/rejected_archive/images/460604/180.jpg",
+        "salty_data_300k/rejected_archive/images/538830/000.jpg",
+        "salty_data_300k/rejected_archive/images/538830/180.jpg",
+        "salty_data_300k/rejected_archive/images/552039/180.jpg",
+        "salty_data_300k/rejected_archive/images/715143/180.jpg",
+        "salty_data_300k/rejected_archive/images/794968/000.jpg",
+        "salty_data_500k/images/1492366/180.jpg"
+      ]
+    },
+    "near_blank": {
+      "flagged": 11,
+      "labels": {
+        "degraded": 10,
+        "usable": 1
+      },
+      "individual_images_passing_baseline": 5,
+      "passing_baseline_and_visually_degraded": 4,
+      "distinct_dataset_folders": 5,
+      "folders_with_baseline_issue_in_sample": 4,
+      "random_active_flags": 0,
+      "counterexamples": [
+        {
+          "path": "salty_data_300k/rejected_archive/images/973058/180.jpg",
+          "split": "candidate_audit",
+          "candidate": "near_blank",
+          "label": "usable",
+          "kind": "dark_low_contrast",
+          "note": "Dark tunnel retains clearly recognizable arch, road, structural ribs and exit. Counterexample: darkness and low patch contrast do not establish a failed image."
+        }
+      ],
+      "paths": [
+        "salty_data_100k/rejected_archive/images/000077/000.jpg",
+        "salty_data_100k/rejected_archive/images/423725/000.jpg",
+        "salty_data_100k/rejected_archive/images/423725/090.jpg",
+        "salty_data_100k/rejected_archive/images/423725/180.jpg",
+        "salty_data_100k/rejected_archive/images/423725/270.jpg",
+        "salty_data_100k_upscaled/images/423725/180.jpg",
+        "salty_data_300k/rejected_archive/images/669882/090.jpg",
+        "salty_data_300k/rejected_archive/images/669882/270.jpg",
+        "salty_data_300k/rejected_archive/images/973058/090.jpg",
+        "salty_data_300k/rejected_archive/images/973058/180.jpg",
+        "salty_data_300k/rejected_archive/images/973058/270.jpg"
+      ]
+    }
+  },
+  "decoded_duplicates": {
+    "scope": "Only sampled views within the same dataset/location directory",
+    "groups": []
+  },
+  "strict_jpeg": {
+    "statuses": {
+      "ok": 868,
+      "issue": 47
+    },
+    "additional_issues": [],
+    "messages": {
+      "tj3DecompressHeader(): Invalid argument": 46,
+      "Not a JPEG file: starts with 0x00 0x00": 1
+    }
+  },
+  "timing_ms_valid_files": {
+    "baseline_ms": {
+      "median": 37.591,
+      "p95": 45.127
+    },
+    "strict_ms": {
+      "median": 2.763,
+      "p95": 4.024
+    },
+    "pixel_hash_ms": {
+      "median": 2.015,
+      "p95": 2.18
+    },
+    "features_ms": {
+      "median": 19.531,
+      "p95": 24.08
+    }
+  },
+  "synthetic": {
+    "source": "salty_data_300k/images/187199/000.jpg",
+    "duplicates": [
+      {
+        "case": "identical_copy",
+        "same_bytes": true,
+        "same_decoded_pixels": true
+      },
+      {
+        "case": "neighbor_view",
+        "same_bytes": false,
+        "same_decoded_pixels": false
+      },
+      {
+        "case": "trailing_bytes",
+        "same_bytes": false,
+        "same_decoded_pixels": true
+      },
+      {
+        "case": "comment_segment",
+        "same_bytes": false,
+        "same_decoded_pixels": true
+      },
+      {
+        "case": "progressive",
+        "same_bytes": false,
+        "same_decoded_pixels": false
+      }
+    ],
+    "cases": {
+      "original": {
+        "baseline": [],
+        "strict": {
+          "status": "ok"
+        },
+        "regional_v2": false,
+        "near_blank": false
+      },
+      "identical_copy": {
+        "baseline": [],
+        "strict": {
+          "status": "ok"
+        },
+        "regional_v2": false,
+        "near_blank": false
+      },
+      "neighbor_view": {
+        "baseline": [],
+        "strict": {
+          "status": "ok"
+        },
+        "regional_v2": false,
+        "near_blank": false
+      },
+      "trailing_bytes": {
+        "baseline": [],
+        "strict": {
+          "status": "ok"
+        },
+        "regional_v2": false,
+        "near_blank": false
+      },
+      "comment_segment": {
+        "baseline": [],
+        "strict": {
+          "status": "ok"
+        },
+        "regional_v2": false,
+        "near_blank": false
+      },
+      "progressive": {
+        "baseline": [],
+        "strict": {
+          "status": "ok"
+        },
+        "regional_v2": false,
+        "near_blank": false
+      },
+      "missing_eoi": {
+        "baseline": [
+          "corrupt_imgs",
+          "truncated_imgs"
+        ],
+        "strict": {
+          "status": "issue",
+          "code": 0,
+          "message": "Premature end of JPEG file"
+        },
+        "regional_v2": null,
+        "near_blank": null
+      },
+      "half_file": {
+        "baseline": [
+          "corrupt_imgs",
+          "truncated_imgs"
+        ],
+        "strict": {
+          "status": "issue",
+          "code": 0,
+          "message": "Premature end of JPEG file"
+        },
+        "regional_v2": null,
+        "near_blank": null
+      },
+      "partial_black": {
+        "baseline": [],
+        "strict": {
+          "status": "ok"
+        },
+        "regional_v2": false,
+        "near_blank": true
+      },
+      "regional_blur": {
+        "baseline": [],
+        "strict": {
+          "status": "ok"
+        },
+        "regional_v2": false,
+        "near_blank": false
+      },
+      "pure_noise": {
+        "baseline": [],
+        "strict": {
+          "status": "ok"
+        },
+        "regional_v2": false,
+        "near_blank": false
+      },
+      "removed_64_entropy_bytes": {
+        "baseline": [],
+        "strict": {
+          "status": "issue",
+          "code": 0,
+          "message": "Corrupt JPEG data: premature end of data segment"
+        },
+        "regional_v2": false,
+        "near_blank": false
+      },
+      "removed_1024_entropy_bytes": {
+        "baseline": [],
+        "strict": {
+          "status": "issue",
+          "code": 0,
+          "message": "Corrupt JPEG data: premature end of data segment"
+        },
+        "regional_v2": false,
+        "near_blank": false
+      }
+    }
+  }
+}

@@ -1,0 +1,346 @@
+[
+  {
+    "path": "salty_data_100k_upscaled/images/423725/180.jpg",
+    "split": "candidate_audit",
+    "candidate": "near_blank",
+    "label": "degraded",
+    "kind": "dark_low_contrast",
+    "note": "Same dark tunnel view in another batch; not an independent example."
+  },
+  {
+    "path": "salty_data_100k/rejected_archive/images/000077/000.jpg",
+    "split": "candidate_audit",
+    "candidate": "near_blank",
+    "label": "degraded",
+    "kind": "dark_low_contrast",
+    "note": "Extremely dark forest/boardwalk; almost no scene detail."
+  },
+  {
+    "path": "salty_data_100k/rejected_archive/images/1271837/090.jpg",
+    "split": "candidate_audit",
+    "candidate": "regional_v2",
+    "label": "degraded",
+    "kind": "regional_blur",
+    "note": "Visually inspected: broad nearly featureless blur along one side, next to recognizable detailed scenery."
+  },
+  {
+    "path": "salty_data_100k/rejected_archive/images/1271837/270.jpg",
+    "split": "candidate_audit",
+    "candidate": "regional_v2",
+    "label": "degraded",
+    "kind": "regional_blur",
+    "note": "Visually inspected: broad nearly featureless blur along one side, next to recognizable detailed scenery."
+  },
+  {
+    "path": "salty_data_100k/rejected_archive/images/207025/000.jpg",
+    "split": "candidate_audit",
+    "candidate": "regional_v2",
+    "label": "degraded",
+    "kind": "regional_blur",
+    "note": "Visually inspected: broad nearly featureless blur along one side, next to recognizable detailed scenery."
+  },
+  {
+    "path": "salty_data_100k/rejected_archive/images/207025/180.jpg",
+    "split": "candidate_audit",
+    "candidate": "regional_v2",
+    "label": "degraded",
+    "kind": "regional_blur",
+    "note": "Visually inspected: broad nearly featureless blur along one side, next to recognizable detailed scenery."
+  },
+  {
+    "path": "salty_data_100k/rejected_archive/images/273308/180.jpg",
+    "split": "candidate_audit",
+    "candidate": "regional_v2",
+    "label": "degraded",
+    "kind": "regional_blur",
+    "note": "Visually inspected: broad nearly featureless blur along one side, next to recognizable detailed scenery."
+  },
+  {
+    "path": "salty_data_100k/rejected_archive/images/377955/180.jpg",
+    "split": "candidate_audit",
+    "candidate": "regional_v2",
+    "label": "degraded",
+    "kind": "regional_blur",
+    "note": "Visually inspected: broad nearly featureless blur along one side, next to recognizable detailed scenery."
+  },
+  {
+    "path": "salty_data_100k/rejected_archive/images/423725/000.jpg",
+    "split": "candidate_audit",
+    "candidate": "near_blank",
+    "label": "degraded",
+    "kind": "dark_low_contrast",
+    "note": "Dark tunnel; lights, road lines and a car survive, but most of the frame has very little visible detail."
+  },
+  {
+    "path": "salty_data_100k/rejected_archive/images/423725/090.jpg",
+    "split": "candidate_audit",
+    "candidate": "near_blank",
+    "label": "degraded",
+    "kind": "dark_low_contrast",
+    "note": "Very dark tunnel wall, with almost no visible detail."
+  },
+  {
+    "path": "salty_data_100k/rejected_archive/images/423725/180.jpg",
+    "split": "candidate_audit",
+    "candidate": "near_blank",
+    "label": "degraded",
+    "kind": "dark_low_contrast",
+    "note": "Dark tunnel; small lights and texture survive in an otherwise very low-detail frame."
+  },
+  {
+    "path": "salty_data_100k/rejected_archive/images/423725/270.jpg",
+    "split": "candidate_audit",
+    "candidate": "near_blank",
+    "label": "degraded",
+    "kind": "dark_low_contrast",
+    "note": "Very dark tunnel wall, with almost no visible detail."
+  },
+  {
+    "path": "salty_data_100k/rejected_archive/images/599092/000.jpg",
+    "split": "candidate_audit",
+    "candidate": "regional_v2",
+    "label": "degraded",
+    "kind": "regional_blur",
+    "note": "Visually inspected: broad nearly featureless blur along one side, next to recognizable detailed scenery."
+  },
+  {
+    "path": "salty_data_100k/rejected_archive/images/650295/270.jpg",
+    "split": "candidate_audit",
+    "candidate": "regional_v2",
+    "label": "degraded",
+    "kind": "regional_blur",
+    "note": "Visually inspected: broad nearly featureless blur along one side, next to recognizable detailed scenery."
+  },
+  {
+    "path": "salty_data_100k/rejected_archive/images/695750/000.jpg",
+    "split": "candidate_audit",
+    "candidate": "regional_v2",
+    "label": "degraded",
+    "kind": "regional_blur",
+    "note": "Visually inspected: broad nearly featureless blur along one side, next to recognizable detailed scenery."
+  },
+  {
+    "path": "salty_data_100k/rejected_archive/images/925962/180.jpg",
+    "split": "candidate_audit",
+    "candidate": "regional_v2",
+    "label": "degraded",
+    "kind": "regional_blur",
+    "note": "Visually inspected: broad nearly featureless blur along one side, next to recognizable detailed scenery."
+  },
+  {
+    "path": "salty_data_205k_upscaled/images/1337935/000.jpg",
+    "split": "candidate_audit",
+    "candidate": "regional_v2",
+    "label": "degraded",
+    "kind": "regional_blur",
+    "note": "Visually inspected: broad nearly featureless blur along one side, next to recognizable detailed scenery."
+  },
+  {
+    "path": "salty_data_205k_upscaled/images/1337935/180.jpg",
+    "split": "candidate_audit",
+    "candidate": "regional_v2",
+    "label": "degraded",
+    "kind": "regional_blur",
+    "note": "Visually inspected: broad nearly featureless blur along one side, next to recognizable detailed scenery."
+  },
+  {
+    "path": "salty_data_205k_upscaled/images/1356936/000.jpg",
+    "split": "candidate_audit",
+    "candidate": "regional_v2",
+    "label": "degraded",
+    "kind": "regional_blur",
+    "note": "Visually inspected: broad nearly featureless blur along one side, next to recognizable detailed scenery."
+  },
+  {
+    "path": "salty_data_205k_upscaled/images/291027/000.jpg",
+    "split": "candidate_audit",
+    "candidate": "regional_v2",
+    "label": "degraded",
+    "kind": "regional_blur",
+    "note": "Visually inspected: broad nearly featureless blur along one side, next to recognizable detailed scenery."
+  },
+  {
+    "path": "salty_data_205k_upscaled/images/291027/180.jpg",
+    "split": "candidate_audit",
+    "candidate": "regional_v2",
+    "label": "degraded",
+    "kind": "regional_blur",
+    "note": "Visually inspected: broad nearly featureless blur along one side, next to recognizable detailed scenery."
+  },
+  {
+    "path": "salty_data_205k_upscaled/images/674096/000.jpg",
+    "split": "candidate_audit",
+    "candidate": "regional_v2",
+    "label": "degraded",
+    "kind": "regional_blur",
+    "note": "Visually inspected: broad nearly featureless blur along one side, next to recognizable detailed scenery."
+  },
+  {
+    "path": "salty_data_205k_upscaled/images/837818/000.jpg",
+    "split": "candidate_audit",
+    "candidate": "regional_v2",
+    "label": "degraded",
+    "kind": "regional_blur",
+    "note": "Visually inspected: broad nearly featureless blur along one side, next to recognizable detailed scenery."
+  },
+  {
+    "path": "salty_data_205k/images/1356936/000.jpg",
+    "split": "candidate_audit",
+    "candidate": "regional_v2",
+    "label": "degraded",
+    "kind": "regional_blur",
+    "note": "Visually inspected: broad nearly featureless blur along one side, next to recognizable detailed scenery."
+  },
+  {
+    "path": "salty_data_300k/rejected_archive/images/077402/180.jpg",
+    "split": "candidate_audit",
+    "candidate": "regional_v2",
+    "label": "degraded",
+    "kind": "regional_blur",
+    "note": "Visually inspected: broad nearly featureless blur along one side, next to recognizable detailed scenery."
+  },
+  {
+    "path": "salty_data_300k/rejected_archive/images/1248603/000.jpg",
+    "split": "candidate_audit",
+    "candidate": "regional_v2",
+    "label": "degraded",
+    "kind": "regional_blur",
+    "note": "Visually inspected: broad nearly featureless blur along one side, next to recognizable detailed scenery."
+  },
+  {
+    "path": "salty_data_300k/rejected_archive/images/1485734/180.jpg",
+    "split": "candidate_audit",
+    "candidate": "regional_v2",
+    "label": "degraded",
+    "kind": "regional_blur",
+    "note": "Visually inspected: broad nearly featureless blur along one side, next to recognizable detailed scenery."
+  },
+  {
+    "path": "salty_data_300k/rejected_archive/images/201048/000.jpg",
+    "split": "candidate_audit",
+    "candidate": "regional_v2",
+    "label": "degraded",
+    "kind": "regional_blur",
+    "note": "Visually inspected: broad nearly featureless blur along one side, next to recognizable detailed scenery."
+  },
+  {
+    "path": "salty_data_300k/rejected_archive/images/201048/180.jpg",
+    "split": "candidate_audit",
+    "candidate": "regional_v2",
+    "label": "degraded",
+    "kind": "regional_blur",
+    "note": "Visually inspected: broad nearly featureless blur along one side, next to recognizable detailed scenery."
+  },
+  {
+    "path": "salty_data_300k/rejected_archive/images/312789/000.jpg",
+    "split": "candidate_audit",
+    "candidate": "regional_v2",
+    "label": "degraded",
+    "kind": "regional_blur",
+    "note": "Visually inspected: broad nearly featureless blur along one side, next to recognizable detailed scenery."
+  },
+  {
+    "path": "salty_data_300k/rejected_archive/images/312789/180.jpg",
+    "split": "candidate_audit",
+    "candidate": "regional_v2",
+    "label": "degraded",
+    "kind": "regional_blur",
+    "note": "Visually inspected: broad nearly featureless blur along one side, next to recognizable detailed scenery."
+  },
+  {
+    "path": "salty_data_300k/rejected_archive/images/460604/180.jpg",
+    "split": "candidate_audit",
+    "candidate": "regional_v2",
+    "label": "degraded",
+    "kind": "regional_blur",
+    "note": "Visually inspected: broad nearly featureless blur along one side, next to recognizable detailed scenery."
+  },
+  {
+    "path": "salty_data_300k/rejected_archive/images/538830/000.jpg",
+    "split": "candidate_audit",
+    "candidate": "regional_v2",
+    "label": "degraded",
+    "kind": "regional_blur",
+    "note": "Visually inspected: broad nearly featureless blur along one side, next to recognizable detailed scenery."
+  },
+  {
+    "path": "salty_data_300k/rejected_archive/images/538830/180.jpg",
+    "split": "candidate_audit",
+    "candidate": "regional_v2",
+    "label": "degraded",
+    "kind": "regional_blur",
+    "note": "Visually inspected: broad nearly featureless blur along one side, next to recognizable detailed scenery."
+  },
+  {
+    "path": "salty_data_300k/rejected_archive/images/552039/180.jpg",
+    "split": "candidate_audit",
+    "candidate": "regional_v2",
+    "label": "degraded",
+    "kind": "regional_blur",
+    "note": "Visually inspected: broad nearly featureless blur along one side, next to recognizable detailed scenery."
+  },
+  {
+    "path": "salty_data_300k/rejected_archive/images/669882/090.jpg",
+    "split": "candidate_audit",
+    "candidate": "near_blank",
+    "label": "degraded",
+    "kind": "dark_low_contrast",
+    "note": "Extremely dark forest; almost no scene detail."
+  },
+  {
+    "path": "salty_data_300k/rejected_archive/images/669882/270.jpg",
+    "split": "candidate_audit",
+    "candidate": "near_blank",
+    "label": "degraded",
+    "kind": "dark_low_contrast",
+    "note": "Extremely dark scene; an orange line survives, but most of the frame has very little visible detail."
+  },
+  {
+    "path": "salty_data_300k/rejected_archive/images/715143/180.jpg",
+    "split": "candidate_audit",
+    "candidate": "regional_v2",
+    "label": "degraded",
+    "kind": "regional_blur",
+    "note": "Visually inspected: broad nearly featureless blur along one side, next to recognizable detailed scenery."
+  },
+  {
+    "path": "salty_data_300k/rejected_archive/images/794968/000.jpg",
+    "split": "candidate_audit",
+    "candidate": "regional_v2",
+    "label": "degraded",
+    "kind": "regional_blur",
+    "note": "Visually inspected: broad nearly featureless blur along one side, next to recognizable detailed scenery."
+  },
+  {
+    "path": "salty_data_300k/rejected_archive/images/973058/090.jpg",
+    "split": "candidate_audit",
+    "candidate": "near_blank",
+    "label": "degraded",
+    "kind": "dark_low_contrast",
+    "note": "Dark tunnel wall with faint seams, very little scene detail."
+  },
+  {
+    "path": "salty_data_300k/rejected_archive/images/973058/180.jpg",
+    "split": "candidate_audit",
+    "candidate": "near_blank",
+    "label": "usable",
+    "kind": "dark_low_contrast",
+    "note": "Dark tunnel retains clearly recognizable arch, road, structural ribs and exit. Counterexample: darkness and low patch contrast do not establish a failed image."
+  },
+  {
+    "path": "salty_data_300k/rejected_archive/images/973058/270.jpg",
+    "split": "candidate_audit",
+    "candidate": "near_blank",
+    "label": "degraded",
+    "kind": "dark_low_contrast",
+    "note": "Extremely dark tunnel wall; almost no scene detail."
+  },
+  {
+    "path": "salty_data_500k/images/1492366/180.jpg",
+    "split": "candidate_audit",
+    "candidate": "regional_v2",
+    "label": "degraded",
+    "kind": "regional_blur",
+    "note": "Visually inspected: broad nearly featureless blur along one side, next to recognizable detailed scenery."
+  }
+]

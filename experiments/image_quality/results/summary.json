@@ -1,0 +1,17 @@
+{
+  "images": 915,
+  "seconds": 60.46739080000407,
+  "sources": {
+    "random_active": 384,
+    "visually_reviewed": 22,
+    "archived_reject": 445,
+    "flagged_active": 64
+  },
+  "strict_issues": 47,
+  "new_strict_issues": [],
+  "candidates": {
+    "naive_regional": 54,
+    "regional": 22,
+    "near_blank": 11
+  }
+}

@@ -1,0 +1,128 @@
+[
+  {
+    "path": "salty_data_300k/rejected_archive/images/973058/270.jpg",
+    "split": "validation",
+    "stratum": "archive_blank",
+    "panoid_group": "dHlCmrFW76cF0Mgkq4lARg"
+  },
+  {
+    "path": "salty_data_300k/rejected_archive/images/552039/090.jpg",
+    "split": "validation",
+    "stratum": "archive_blur",
+    "panoid_group": "DOB_-_uDQUdCnLQ7p8CDdA"
+  },
+  {
+    "path": "salty_data_300k/rejected_archive/images/025748/090.jpg",
+    "split": "validation",
+    "stratum": "archive_blur",
+    "panoid_group": "9DJzf4X6BJf0WpkjFPLtWg"
+  },
+  {
+    "path": "salty_data_100k/rejected_archive/images/599092/270.jpg",
+    "split": "validation",
+    "stratum": "archive_blur",
+    "panoid_group": "pUL-w_94oK7zhctcgLQq3A"
+  },
+  {
+    "path": "salty_data_100k/rejected_archive/images/142040/000.jpg",
+    "split": "validation",
+    "stratum": "archive_blur",
+    "panoid_group": "gU-2RmI513igUdctkJHWBg"
+  },
+  {
+    "path": "salty_data_300k/rejected_archive/images/1019735/000.jpg",
+    "split": "validation",
+    "stratum": "archive_blur",
+    "panoid_group": "6I8w_J78XTd266vBEaHIQA"
+  },
+  {
+    "path": "salty_data_100k/rejected_archive/images/1092300/000.jpg",
+    "split": "validation",
+    "stratum": "archive_other_views",
+    "panoid_group": "5iRDa3lNi9yYY23rGrGQwQ"
+  },
+  {
+    "path": "salty_data_100k/rejected_archive/images/273308/090.jpg",
+    "split": "validation",
+    "stratum": "archive_other_views",
+    "panoid_group": "vpSNeRaPzW-Q2liKGmC4BA"
+  },
+  {
+    "path": "salty_data_100k/rejected_archive/images/994889/270.jpg",
+    "split": "validation",
+    "stratum": "archive_other_views",
+    "panoid_group": "G82FxwiLqOcHXHbvFH3Tig"
+  },
+  {
+    "path": "salty_data_205k_upscaled/images/797913/000.jpg",
+    "split": "validation",
+    "stratum": "active_flagged_blur",
+    "panoid_group": "LSQuNZblwtY8ouQCocFPLQ"
+  },
+  {
+    "path": "salty_data_205k_upscaled/images/064063/180.jpg",
+    "split": "validation",
+    "stratum": "active_flagged_blur",
+    "panoid_group": "duApetmB_yuQTHp8l6POaA"
+  },
+  {
+    "path": "salty_data_205k/images/299999/000.jpg",
+    "split": "validation",
+    "stratum": "random_active",
+    "panoid_group": "ik69aiwM_yglCHwxI0E0Jw"
+  },
+  {
+    "path": "salty_data_100k_upscaled/images/264626/090.jpg",
+    "split": "validation",
+    "stratum": "random_active",
+    "panoid_group": "_y7oI_J2fCOP8DXktJST8Q"
+  },
+  {
+    "path": "salty_data_100k/images/828220/000.jpg",
+    "split": "validation",
+    "stratum": "random_active",
+    "panoid_group": "lLx8Tx2hvZBYdK6O74SLTw"
+  },
+  {
+    "path": "salty_data_100k/images/604791/090.jpg",
+    "split": "validation",
+    "stratum": "random_active",
+    "panoid_group": "7Bi6ua4-itJZH6gUHORNNw"
+  },
+  {
+    "path": "salty_data_300k/images/1340845/270.jpg",
+    "split": "validation",
+    "stratum": "random_active",
+    "panoid_group": "hRrgF2DaRpq5nK2q1Zaq2g"
+  },
+  {
+    "path": "salty_data_205k_upscaled/images/1290835/270.jpg",
+    "split": "validation",
+    "stratum": "random_active",
+    "panoid_group": "p5BYyq6IDFlUs-xkmqgl2g"
+  },
+  {
+    "path": "salty_data_205k_upscaled/images/539600/270.jpg",
+    "split": "validation",
+    "stratum": "random_active",
+    "panoid_group": "78nHP059zDVmiM2PXTfdjw"
+  },
+  {
+    "path": "salty_data_300k/images/134360/180.jpg",
+    "split": "validation",
+    "stratum": "random_active",
+    "panoid_group": "H25fkGQFSHMqbh8ChW-IBQ"
+  },
+  {
+    "path": "salty_data_100k/images/030193/090.jpg",
+    "split": "validation",
+    "stratum": "random_active",
+    "panoid_group": "c3HqcD0X-QxFeIsxCdtlfA"
+  },
+  {
+    "path": "salty_data_100k/images/907478/180.jpg",
+    "split": "validation",
+    "stratum": "random_active",
+    "panoid_group": "Tc69UHD1SCZyxaHL_QY_Gw"
+  }
+]

@@ -6,10 +6,11 @@ Usage:
     uv run salty_reject.py <data_dir> [--dry-run]
     uv run salty_reject.py <data_dir> --reject-all-flagged [--dry-run]
     uv run salty_reject.py <data_dir> --from-file flagged.txt [--dry-run]
-    uv run salty_reject.py <data_dir> --undo --from-file undo_list.txt [--dry-run]
+    uv run salty_reject.py <data_dir> --undo [--from-file undo_subset.txt] [--dry-run]
     uv run salty_reject.py <data_dir> --purge [--dry-run]
 
-If --from-file is omitted, <data_dir>/flagged.txt is used automatically.
+If --from-file is omitted, reject mode uses <data_dir>/flagged.txt and undo mode
+uses the automatically maintained <data_dir>/reject_list.txt.
 Use --reject-all-flagged to include entries with a leading '#', without editing
 flagged.txt. Headers and notes are ignored; duplicate indices use the first reason.
 Without this option, only uncommented entries are processed.
@@ -19,11 +20,12 @@ but cannot be combined with --undo or --purge.
 Rejection archives the entire images/<index>/ folder and metadata/<index>.json,
 including all views for that location, and updates its CSV record.
 
-undo_list.txt is an example input filename, NOT an automatically generated file.
-To undo, create a text file with the indices to restore, one per line without '#',
-then pass it with --undo --from-file <file>. Recovery data is stored automatically
-in <data_dir>/rejected_archive/records/<index>.json. Undo skips commented lines;
-the unchanged commented flagged.txt will not select those indices for restoration.
+Each real rejection updates <data_dir>/reject_list.txt with every entry that still
+has a recovery record, including entries accumulated across separate runs. Running
+with --undo and no --from-file restores that entire list. Pass --from-file to undo
+only a chosen subset. Successfully restored entries are removed from reject_list.txt;
+failed or partial restores remain available for retry. Recovery data is stored in
+<data_dir>/rejected_archive/records/<index>.json.
 """
 
 import argparse
@@ -52,6 +54,7 @@ class _Paths:
     arch_meta:    Path
     arch_records: Path
     rejects_csv:  Path
+    reject_list:  Path
 
     @classmethod
     def from_data_dir(cls, data_dir: Path) -> "_Paths":
@@ -65,6 +68,7 @@ class _Paths:
             arch_meta=arch / "metadata",
             arch_records=arch / "records",
             rejects_csv=data_dir / "rejects.csv",
+            reject_list=data_dir / "reject_list.txt",
         )
 
 
@@ -93,7 +97,7 @@ def _batch_remove_from_csv(csv_path, indices):
         return n
     except Exception as e:
         print(f"  WARNING: Could not update {csv_path.name}: {e}")
-        return 0
+        return None
 
 
 def _batch_append_to_csv(csv_path, rows):
@@ -109,8 +113,15 @@ def _batch_append_to_csv(csv_path, rows):
 
 
 def append_to_csv(csv_path, row_dict):
-    """Append a single row dict to a CSV. Atomic write via temp file."""
+    """Append a row unless its index is already present. Return whether it was added."""
+    if csv_path.exists():
+        df = pd.read_csv(csv_path)
+        existing = pd.to_numeric(df["index"], errors="coerce")
+        row_index = int(row_dict["index"])
+        if existing.eq(row_index).any():
+            return False
     _batch_append_to_csv(csv_path, [row_dict])
+    return True
 
 
 def _rejects_csv_for(source_file, data_dir: Path, fallback: Path) -> Path:
@@ -123,6 +134,35 @@ def _rejects_csv_for(source_file, data_dir: Path, fallback: Path) -> Path:
         return fallback
     suffix = source_file.stem[len("completed"):]  # e.g. "_35000" or ""
     return data_dir / f"rejects{suffix}.csv"
+
+
+def _recovery_record_indices(paths):
+    """Return the numeric indices that currently have recovery records."""
+    indices = []
+    if paths.arch_records.exists():
+        for record_path in paths.arch_records.glob("*.json"):
+            try:
+                indices.append(int(record_path.stem))
+            except ValueError:
+                continue
+    return sorted(set(indices))
+
+
+def _refresh_reject_list(paths):
+    """Rewrite the automatic reject list from the recovery records still present."""
+    contents = "".join(f"{idx}\n" for idx in _recovery_record_indices(paths))
+    tmp = paths.reject_list.with_suffix(".tmp")
+    try:
+        tmp.write_text(contents, encoding="utf-8")
+        os.replace(tmp, paths.reject_list)
+        return True
+    except Exception as e:
+        print(f"  WARNING: Could not update {paths.reject_list.name}: {e}")
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -168,14 +208,18 @@ def parse_index_file(path, include_commented=False):
 # ---------------------------------------------------------------------------
 
 def _archive_resource(source, dest, idx_str, resource, move_label):
-    """Archive a resource; an existing destination retains the skip behavior."""
+    """Archive a resource, treating destination conflicts and move errors as failures."""
     if dest.exists():
-        print(f"  WARN {idx_str}: archive destination {dest} already exists — skipping {resource} archive")
-    else:
+        print(f"  ERROR {idx_str}: archive destination {dest} already exists — cannot archive {resource}")
+        return False
+    try:
         shutil.move(str(source), str(dest))
-        if not dest.exists():
-            print(f"  ERROR {idx_str}: {move_label} move failed — {dest} not found after move")
-            return False
+    except Exception as e:
+        print(f"  ERROR {idx_str}: {move_label} move failed: {e}")
+        return False
+    if not dest.exists():
+        print(f"  ERROR {idx_str}: {move_label} move failed — {dest} not found after move")
+        return False
     return True
 
 
@@ -186,7 +230,18 @@ def _restore_resource(source, dest, idx_str, resource, archive_label):
             print(f"  WARN {idx_str}: restore destination {dest} already exists — skipping {resource} restore")
             return False
         dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(source), str(dest))
+        try:
+            shutil.move(str(source), str(dest))
+        except Exception as e:
+            print(f"  ERROR {idx_str}: could not restore {resource}: {e}")
+            return False
+        if dest.exists():
+            return True
+        print(f"  ERROR {idx_str}: {resource} restore failed — {dest} not found after move")
+        return False
+    if dest.exists():
+        # A previous undo may have moved this resource before a later step failed.
+        print(f"  INFO {idx_str}: {resource} already restored")
         return True
     print(f"  WARN {idx_str}: archive {archive_label} not found (purged?)")
     return False
@@ -337,6 +392,18 @@ def do_reject(data_dir, index_reasons, dry_run):
         if lat == 0.0 and lon == 0.0:
             print(f"  WARN {idx_str}: could not determine lat/lon, using 0.0")
 
+        archive_conflicts = []
+        if has_images and (paths.arch_images / idx_str).exists():
+            archive_conflicts.append(paths.arch_images / idx_str)
+        if has_metadata and (paths.arch_meta / f"{idx_str}.json").exists():
+            archive_conflicts.append(paths.arch_meta / f"{idx_str}.json")
+        if archive_conflicts:
+            for conflict in archive_conflicts:
+                print(f"  ERROR {idx_str}: archive destination {conflict} already exists")
+            print("    Resolve the archive conflict before retrying; no changes made for this entry.")
+            n_error += 1
+            continue
+
         if dry_run:
             print(f"  [DRY RUN] {idx_str}")
             if has_completed:
@@ -389,9 +456,18 @@ def do_reject(data_dir, index_reasons, dry_run):
 
     # Batch CSV updates — one read+write per CSV file instead of one per entry
     if not dry_run:
+        failed_sources = set()
         for source_path, indices in completed_removals.items():
-            _batch_remove_from_csv(source_path, indices)
+            removed = _batch_remove_from_csv(source_path, indices)
+            if removed is None or removed < len(indices):
+                print(f"  ERROR: could not remove every selected row from {source_path.name}; "
+                      "recovery records preserved for undo")
+                failed_sources.add(source_path)
+                n_error += len(indices)
+                n_rejected -= len(indices)
         for src, rows in rejects_by_source.items():
+            if src in failed_sources:
+                continue
             target = _rejects_csv_for(src, data_dir, paths.rejects_csv)
             try:
                 _batch_append_to_csv(target, rows)
@@ -400,6 +476,10 @@ def do_reject(data_dir, index_reasons, dry_run):
                 print(f"Files archived and recovery records written — run --undo to restore.")
                 n_error += len(rows)
                 n_rejected -= len(rows)
+
+        # Recovery records are the source of truth. Rebuilding this file here
+        # makes separate reject runs accumulate into one ready-to-use reject list.
+        _refresh_reject_list(paths)
 
     print()
     prefix = "[DRY RUN] " if dry_run else ""
@@ -480,12 +560,12 @@ def do_undo(data_dir, index_reasons, dry_run):
             ):
                 ok = False
 
-        # Restore completed row BEFORE removing from rejects — if this fails,
-        # the entry stays in rejects (consistent state) and record is preserved.
+        # Restore the completed row only after all files are safely in place.
+        # The append is idempotent so interrupted undo operations can be retried.
         if had_completed and not completed_row:
             print(f"  WARN {idx_str}: recovery record has had_completed_row=true but no row data — skipping CSV restore")
             ok = False
-        elif had_completed and completed_row:
+        elif ok and had_completed and completed_row:
             target = data_dir / source_name if source_name else data_dir / "completed.csv"
             if not target.exists():
                 print(f"  WARN {idx_str}: original CSV {source_name!r} not found, "
@@ -502,7 +582,6 @@ def do_undo(data_dir, index_reasons, dry_run):
         # Queue for batch rejects removal + record deletion (executed after loop)
         if ok:
             successfully_restored.append((idx, record_path))
-            n_restored += 1
         else:
             print(f"  WARN {idx_str}: some restores were incomplete — recovery record preserved for retry")
             n_partial += 1
@@ -510,10 +589,22 @@ def do_undo(data_dir, index_reasons, dry_run):
     # Batch remove from all rejects CSVs — O(files) instead of O(entries × files)
     if successfully_restored and not dry_run:
         indices_to_remove = {idx for idx, _ in successfully_restored}
+        rejects_updated = True
         for rf in rejected_files:
-            _batch_remove_from_csv(rf, indices_to_remove)
-        for _, rp in successfully_restored:
-            rp.unlink()
+            if _batch_remove_from_csv(rf, indices_to_remove) is None:
+                rejects_updated = False
+        if rejects_updated:
+            for _, rp in successfully_restored:
+                try:
+                    rp.unlink()
+                    n_restored += 1
+                except OSError as e:
+                    print(f"  ERROR: could not remove recovery record {rp.name}: {e}")
+                    n_error += 1
+        else:
+            print("  ERROR: could not update all rejects CSVs; recovery records preserved for retry")
+            n_error += len(successfully_restored)
+        _refresh_reject_list(paths)
 
     print()
     prefix = "[DRY RUN] " if dry_run else ""
@@ -570,6 +661,7 @@ def do_purge(data_dir, dry_run):
         return
 
     shutil.rmtree(str(paths.arch))
+    _refresh_reject_list(paths)
     print(f"Deleted {paths.arch}")
 
 
@@ -581,11 +673,12 @@ def main():
     parser = argparse.ArgumentParser(description="SALTY reject tool")
     parser.add_argument("data_dir", help="Path to salty_data directory")
     parser.add_argument("--from-file", metavar="FILE",
-                        help="File of indices to reject/undo (one per line)")
-    parser.add_argument("--undo",    action="store_true",
-                        help="Restore rejected entries back to completed")
-    parser.add_argument("--purge",   action="store_true",
-                        help="Permanently delete rejected_archive/ (irreversible)")
+                        help="File of indices to reject, or an optional undo subset (one per line)")
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument("--undo", action="store_true",
+                            help="Restore rejected entries; defaults to the generated reject_list.txt")
+    mode_group.add_argument("--purge", action="store_true",
+                            help="Permanently delete rejected_archive/ (irreversible)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Show what would happen without making any changes")
     parser.add_argument("--reject-all-flagged", action="store_true",
@@ -603,21 +696,35 @@ def main():
         do_purge(data_dir, args.dry_run)
         return
 
+    index_reasons = None
     if not args.from_file:
-        default = data_dir / "flagged.txt"
-        if default.exists():
+        default = data_dir / ("reject_list.txt" if args.undo else "flagged.txt")
+        if args.undo:
+            # Recovery records remain authoritative if the generated text file
+            # is missing, stale, or could not be rewritten.
+            recovery_indices = _recovery_record_indices(_Paths.from_data_dir(data_dir))
+            if default.exists():
+                print(f"No --from-file specified, using {default}")
+            elif recovery_indices:
+                print("No reject_list.txt found, using archived recovery records")
+            else:
+                print(f"ERROR: automatic reject list {default} not found")
+                sys.exit(1)
+            index_reasons = [(idx, "manual_reject") for idx in recovery_indices]
+        elif default.exists():
             print(f"No --from-file specified, using {default}")
             args.from_file = str(default)
         else:
-            print("ERROR: --from-file is required for reject/undo modes (no flagged.txt found in data_dir)")
+            print(f"ERROR: default flagged list {default} not found")
             sys.exit(1)
 
-    from_file = Path(args.from_file)
-    if not from_file.exists():
-        print(f"ERROR: {from_file} not found")
-        sys.exit(1)
+    if index_reasons is None:
+        from_file = Path(args.from_file)
+        if not from_file.exists():
+            print(f"ERROR: {from_file} not found")
+            sys.exit(1)
 
-    index_reasons = parse_index_file(from_file, include_commented=args.reject_all_flagged)
+        index_reasons = parse_index_file(from_file, include_commented=args.reject_all_flagged)
     if not index_reasons:
         print("No indices found in file. Nothing to do.")
         return

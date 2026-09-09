@@ -1,0 +1,12 @@
+{
+  "audited_files_checked": 43,
+  "source_hash_mismatches": [],
+  "cached_decision_mismatches": [],
+  "development_validation_shared_panoids": [],
+  "regional_distinct_panoids": 24,
+  "near_blank_distinct_panoids": 4,
+  "python": "3.13.13",
+  "pillow": "12.1.0",
+  "numpy": "2.4.2",
+  "synthetic_assertions": "passed"
+}

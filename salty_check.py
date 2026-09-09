@@ -32,6 +32,7 @@ from pathlib import Path, PurePosixPath
 from PIL import Image
 import numpy as np
 import pandas as pd
+import simplejpeg
 from tqdm import tqdm
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}$")
@@ -97,6 +98,7 @@ class ScanFindings:
     size_outliers:         list = field(default_factory=list)   # list[tuple[int, str, int, str]]
     blank_imgs:            list = field(default_factory=list)   # list[tuple[int, str, float]]
     blurry_imgs:           list = field(default_factory=list)   # list[tuple[int, str, float]]
+    regional_blurry_imgs:  list = field(default_factory=list)   # list[tuple[int, str, str]] (side)
     truncated_imgs:        list = field(default_factory=list)   # list[tuple[int, str]]
     duplicate_views:       list = field(default_factory=list)   # list[tuple[int, str, str]]
     unexpected_files:      list = field(default_factory=list)   # list[tuple[int, str]]
@@ -211,6 +213,20 @@ class NamedBytesIO(io.BytesIO):
     def __init__(self, raw, name):
         super().__init__(raw)
         self.name = name
+
+
+class InputValidationError(ValueError):
+    """A required checker input cannot be used safely."""
+
+
+@dataclass
+class InputDiagnostics:
+    """Warnings found while validating inputs before the image scan."""
+    warning_count: int = 0
+
+    def warn(self, message, count=1):
+        print(f"  WARNING: {message}")
+        self.warning_count += count
 
 
 class _ArchiveIndexBuilder:
@@ -341,7 +357,7 @@ def _parse_index(value):
     return int(number)
 
 
-def _csv_index_values(series, csv_file):
+def _csv_index_values(series, csv_file, diagnostics=None, report_warning=True):
     """Preserve valid rows while reporting invalid indices consistently."""
     values = []
     for value in series:
@@ -350,12 +366,19 @@ def _csv_index_values(series, csv_file):
         except ValueError:
             values.append(None)
     bad_count = sum(value is None for value in values)
-    if bad_count:
-        print(f"  WARNING: {bad_count} non-integer value(s) in index column of {csv_file.name} - skipping those rows")
+    if bad_count and report_warning:
+        message = (
+            f"{bad_count} non-integer value(s) in index column of "
+            f"{csv_file.name} - skipping those rows"
+        )
+        if diagnostics is None:
+            print(f"  WARNING: {message}")
+        else:
+            diagnostics.warn(message, bad_count)
     return pd.Series(values, index=series.index, dtype=object)
 
 
-def load_csv_indices(files):
+def load_csv_indices(files, diagnostics=None):
     """Load index values from one or more CSVs. Returns (unique set, raw list)."""
     raw = []
     for csv_file in files:
@@ -363,14 +386,14 @@ def load_csv_indices(files):
             if hasattr(csv_file, "seek"):
                 csv_file.seek(0)
             series = pd.read_csv(csv_file, dtype={"index": str})["index"]
-            indices = _csv_index_values(series, csv_file)
+            indices = _csv_index_values(series, csv_file, diagnostics)
             raw.extend(indices.dropna().tolist())
         except Exception as e:
-            print(f"  WARNING: Could not read {csv_file.name}: {e}")
+            raise InputValidationError(f"could not read {csv_file.name}: {e}") from e
     return set(raw), raw
 
 
-def load_completed_panoids(files):
+def load_completed_panoids(files, report_invalid=True):
     """Load {index: panoid} from completed CSVs. Used for CSV↔metadata cross-check."""
     result = {}
     for csv_file in files:
@@ -381,23 +404,43 @@ def load_completed_panoids(files):
             if "panoid" in df.columns and "index" in df.columns:
                 sub = df[["index", "panoid"]].dropna(subset=["panoid"])
                 sub = sub.copy()
-                sub["index"] = _csv_index_values(sub["index"], csv_file)
+                sub["index"] = _csv_index_values(
+                    sub["index"], csv_file, report_warning=report_invalid,
+                )
                 sub = sub.dropna(subset=["index"]).astype({"panoid": str})
                 result.update(zip(sub["index"], sub["panoid"]))
         except Exception as e:
-            print(f"  WARNING: Could not read panoids from {csv_file.name}: {e}")
+            raise InputValidationError(
+                f"could not read panoids from {csv_file.name}: {e}"
+            ) from e
     return result
 
 
-def load_source_coords(source_path):
+def load_source_coords(source_path, diagnostics=None):
     """Load source CSV and return {index: (lat, lon)} dict."""
     df = pd.read_csv(source_path, dtype=str)
-    idx_col = _csv_index_values(df.iloc[:, 0], source_path)
+    if df.shape[1] < 3:
+        raise InputValidationError(
+            f"{source_path.name} must contain index, latitude, and longitude columns"
+        )
+    idx_col = _csv_index_values(df.iloc[:, 0], source_path, diagnostics)
     valid = idx_col.notna()
     df = df.loc[valid]
     idx_col = idx_col.loc[valid]
-    lat_col = df.iloc[:, 1].astype(float)
-    lon_col = df.iloc[:, 2].astype(float)
+    if df.empty:
+        raise InputValidationError(f"{source_path.name} contains no usable index rows")
+    try:
+        lat_col = df.iloc[:, 1].astype(float)
+        lon_col = df.iloc[:, 2].astype(float)
+    except (TypeError, ValueError) as exc:
+        raise InputValidationError(
+            f"{source_path.name} contains a non-numeric latitude or longitude"
+        ) from exc
+    finite = np.isfinite(lat_col.to_numpy()) & np.isfinite(lon_col.to_numpy())
+    if not finite.all():
+        raise InputValidationError(
+            f"{source_path.name} contains a non-finite latitude or longitude"
+        )
     return dict(zip(idx_col, zip(lat_col, lon_col)))
 
 
@@ -411,8 +454,10 @@ def load_reject_reasons(files):
             df = pd.read_csv(csv_file)
             if "reason" in df.columns:
                 reasons.update(df["reason"].dropna().values.tolist())
-        except Exception:
-            pass
+        except Exception as e:
+            raise InputValidationError(
+                f"could not read rejection reasons from {csv_file.name}: {e}"
+            ) from e
     return reasons
 
 
@@ -432,8 +477,6 @@ def write_flagged_export(path, sections):
         for idx, detail in entries:
             lines.append(f"# {idx:06d}  # {label}: {detail}")
             total += 1
-    if total == 0:
-        return 0
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return total
 
@@ -455,6 +498,17 @@ def _detail_block(header, items, formatter, n=20):
 # Main-process helpers extracted from main()
 # ---------------------------------------------------------------------------
 
+def _positive_int(value):
+    """Parse a strictly positive command-line integer."""
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
+
+
 def _parse_args():
     """Parse CLI arguments."""
     parser = argparse.ArgumentParser(description="SALTY data integrity checker")
@@ -469,9 +523,9 @@ def _parse_args():
     )
     parser.add_argument(
         "--workers",
-        type=int,
-        default=os.cpu_count(),
-        help=f"Number of parallel scan workers (default: {os.cpu_count()})",
+        type=_positive_int,
+        default=os.cpu_count() or 1,
+        help=f"Number of parallel scan workers (default: {os.cpu_count() or 1})",
     )
     parser.add_argument(
         "--no-export",
@@ -481,53 +535,68 @@ def _parse_args():
     return parser.parse_args()
 
 
-def _validate_dirs(salty_data, images_dir):
+def _validate_dirs(salty_data, images_dir, diagnostics=None):
     """Validate required directories exist. Returns has_metadata_dir flag."""
-    if not salty_data.exists():
-        print(f"ERROR: {salty_data} not found")
-        sys.exit(1)
+    if not salty_data.is_dir():
+        raise InputValidationError(f"{salty_data} is not a directory")
     if not images_dir.exists():
-        print(f"ERROR: {images_dir} not found")
-        sys.exit(1)
+        raise InputValidationError(f"{images_dir} not found")
+    if not images_dir.is_dir():
+        raise InputValidationError(f"{images_dir} is not a directory")
     metadata_dir = salty_data / "metadata"
     has_metadata_dir = metadata_dir.exists()
+    if has_metadata_dir and not metadata_dir.is_dir():
+        raise InputValidationError(f"{metadata_dir} is not a directory")
     if not has_metadata_dir:
-        print(f"WARNING: {metadata_dir} not found — metadata checks will be skipped")
+        message = f"{metadata_dir} not found — metadata checks will be skipped"
+        if diagnostics is None:
+            print(f"  WARNING: {message}")
+        else:
+            diagnostics.warn(message)
     return has_metadata_dir
 
 
-def _load_csvs(salty_data):
+def _load_csvs(salty_data, diagnostics=None):
     """Discover and load completed + rejected CSVs. Returns dict of all derived data."""
     completed_files = sorted(salty_data.glob("completed*.csv"))
     rejected_files  = sorted(salty_data.glob("rejects*.csv"))
 
-    return _load_csv_file_lists(completed_files, rejected_files)
+    return _load_csv_file_lists(completed_files, rejected_files, diagnostics)
 
 
-def _load_csv_file_lists(completed_files, rejected_files):
+def _load_csv_file_lists(completed_files, rejected_files, diagnostics=None):
     """Load already-discovered completed and rejected CSV file objects."""
 
     completed_set, completed_raw = set(), []
     completed_panoids = {}
     if completed_files:
-        completed_set, completed_raw = load_csv_indices(completed_files)
-        completed_panoids = load_completed_panoids(completed_files)
+        completed_set, completed_raw = load_csv_indices(completed_files, diagnostics)
+        # The index loader already reported malformed rows from these files.
+        completed_panoids = load_completed_panoids(completed_files, report_invalid=False)
         names = ", ".join(csv_file.name for csv_file in completed_files)
         print(f"  completed : {names}")
         print(f"            -> {len(completed_set):,} unique entries")
     else:
-        print("  WARNING: No completed*.csv found")
+        message = "No completed*.csv found"
+        if diagnostics is None:
+            print(f"  WARNING: {message}")
+        else:
+            diagnostics.warn(message)
 
     rejected_set, rejected_raw = set(), []
     reject_reasons = Counter()
     if rejected_files:
-        rejected_set, rejected_raw = load_csv_indices(rejected_files)
+        rejected_set, rejected_raw = load_csv_indices(rejected_files, diagnostics)
         reject_reasons = load_reject_reasons(rejected_files)
         names = ", ".join(csv_file.name for csv_file in rejected_files)
         print(f"  rejects   : {names}")
         print(f"            -> {len(rejected_set):,} unique entries")
     else:
-        print("  WARNING: No rejects*.csv found")
+        message = "No rejects*.csv found"
+        if diagnostics is None:
+            print(f"  WARNING: {message}")
+        else:
+            diagnostics.warn(message)
 
     return dict(
         completed_set=completed_set,
@@ -575,6 +644,10 @@ def _archive_image_location(info, parts):
     if info.isfile():
         for pos, part in enumerate(parts[:-1]):
             if part != "images":
+                continue
+            # Only direct children of images/<numeric-folder>/ belong to a
+            # location. Deeper descendants must not affect root selection.
+            if pos + 3 != len(parts):
                 continue
             try:
                 idx = int(parts[pos + 1])
@@ -702,16 +775,20 @@ def _index_tar_archive(archive_path):
     )
 
 
-def _load_source_csv(source_path):
-    """Load source coordinate CSV. Returns (source_coords, source_indices) or (None, None)."""
+def _load_source_csv(source_path, diagnostics=None):
+    """Load and validate an explicitly requested source coordinate CSV."""
     if not source_path.exists():
-        print(f"  WARNING: --source-csv {source_path} not found, skipping coverage check")
-        return None, None
+        raise InputValidationError(f"--source-csv {source_path} not found")
+    if not source_path.is_file():
+        raise InputValidationError(f"--source-csv {source_path} is not a file")
     try:
-        source_coords = load_source_coords(source_path)
+        source_coords = load_source_coords(source_path, diagnostics)
+    except InputValidationError:
+        raise
     except Exception as e:
-        print(f"  WARNING: Could not load --source-csv {source_path.name}: {e} — skipping coverage check")
-        return None, None
+        raise InputValidationError(
+            f"could not load --source-csv {source_path.name}: {e}"
+        ) from e
     source_indices = set(source_coords.keys())
     print(f"  source    : {source_path.name} -> {len(source_indices):,} entries")
     return source_coords, source_indices
@@ -763,6 +840,7 @@ def _merge_folder_result(findings, folder_result):
         ("size_outliers", findings.size_outliers),
         ("blank_imgs", findings.blank_imgs),
         ("blurry_imgs", findings.blurry_imgs),
+        ("regional_blurry_imgs", findings.regional_blurry_imgs),
         ("truncated_imgs", findings.truncated_imgs),
         ("duplicate_views", findings.duplicate_views),
         ("unexpected_files", findings.unexpected_files),
@@ -962,6 +1040,11 @@ _DETAIL_SPECS = [
         lambda x: f"{x[0]:06d}/{x[1]}  blur_score={x[2]}",
     ),
     (
+        "Large regional blur",
+        lambda f, _: f.regional_blurry_imgs,
+        lambda x: f"{x[0]:06d}/{x[1]}  blurred {x[2]} side beside sharp scenery",
+    ),
+    (
         "Missing metadata",
         lambda f, _: sorted(f.missing_meta),
         lambda x: f"{x:06d}.json",
@@ -1121,6 +1204,10 @@ _EXPORT_SPECS = [
         lambda f, _: [(x[0], f"{x[1]}: score={x[2]}") for x in f.blurry_imgs],
     ),
     (
+        "regional_blurry_imgs",
+        lambda f, _: [(x[0], f"{x[1]}: blurred {x[2]} side") for x in f.regional_blurry_imgs],
+    ),
+    (
         "outside_california",
         lambda f, _: [(x[0], f"{x[1]}: ({x[2]:.6f}, {x[3]:.6f})") for x in f.outside_california],
     ),
@@ -1221,7 +1308,10 @@ def _build_export_sections(findings, derived):
     return sections
 
 
-def _print_report(findings, derived, disk_indices, has_metadata_dir, rejected_count, reject_reasons, source_indices):
+def _print_report(
+    findings, derived, disk_indices, has_metadata_dir, rejected_count,
+    reject_reasons, source_indices, input_warnings=0,
+):
     """Print the Results section. Returns (failure count, warning count)."""
     print()
     print("Results")
@@ -1246,7 +1336,7 @@ def _print_report(findings, derived, disk_indices, has_metadata_dir, rejected_co
 
     # [2] Image integrity
     n2_bad = (len(findings.corrupt_imgs) + len(findings.bad_dimensions) + len(findings.bad_color_mode)
-              + len(findings.blank_imgs) + len(findings.blurry_imgs)
+              + len(findings.blank_imgs) + len(findings.blurry_imgs) + len(findings.regional_blurry_imgs)
               + len(findings.truncated_imgs) + len(findings.duplicate_views))
     issues  += n2_bad
     tag2     = "PASS" if n2_bad == 0 else "FAIL"
@@ -1261,6 +1351,8 @@ def _print_report(findings, derived, disk_indices, has_metadata_dir, rejected_co
         summary2 += f" / {len(findings.blank_imgs):,} blank/degenerate"
     if findings.blurry_imgs:
         summary2 += f" / {len(findings.blurry_imgs):,} blurry"
+    if findings.regional_blurry_imgs:
+        summary2 += f" / {len(findings.regional_blurry_imgs):,} regional blur"
     print(f"[2] Image integrity (readable, 1024x1024): {tag2} — {summary2}")
 
     # [3] Metadata integrity
@@ -1347,7 +1439,7 @@ def _print_report(findings, derived, disk_indices, has_metadata_dir, rejected_co
         for line in details:
             print(line)
 
-    warnings = (len(derived.duplicate_rejected) + len(findings.unexpected_files)
+    warnings = (input_warnings + len(derived.duplicate_rejected) + len(findings.unexpected_files)
                 + len(findings.size_outliers))
     if has_metadata_dir:
         warnings += len(derived.orphan_meta)
@@ -1428,8 +1520,9 @@ def _check_image(img_path, idx, result, read_bytes, view_hashes):
     elif file_size > MAX_FILE_SIZE:
         result["size_outliers"].append((idx, img_path.name, file_size, "suspiciously large"))
 
-    file_hash = hashlib.md5(raw, usedforsecurity=False).hexdigest()
-    if file_hash in view_hashes:
+    file_hash = ("file", hashlib.md5(raw, usedforsecurity=False).digest())
+    byte_duplicate = file_hash in view_hashes
+    if byte_duplicate:
         result["duplicate_views"].append((idx, img_path.name, view_hashes[file_hash]))
     else:
         view_hashes[file_hash] = img_path.name
@@ -1440,14 +1533,36 @@ def _check_image(img_path, idx, result, read_bytes, view_hashes):
         with Image.open(io.BytesIO(raw)) as img:
             is_jpeg = img.format == "JPEG"
             img.load()
-            _check_decoded_image(img, idx, img_path.name, result)
+            if not is_jpeg:
+                actual_format = img.format or "unknown"
+                result["corrupt_imgs"].append((
+                    idx, img_path.name, f"expected JPEG, got {actual_format}",
+                ))
+                return
+            # Pillow can recover damaged JPEG scans without raising. Decode
+            # every component again with recoverable errors treated as fatal.
+            try:
+                simplejpeg.decode_jpeg(
+                    raw, colorspace="CMYK" if img.mode == "CMYK" else "RGB",
+                    strict=True,
+                )
+            except ValueError as exc:
+                result["corrupt_imgs"].append((idx, img_path.name, f"strict JPEG: {exc}"))
+                return
+            pixels = np.asarray(img)
+            if img.mode == "RGB":
+                pixel_hash = ("pixels", img.mode, img.size, hashlib.sha256(pixels.tobytes()).digest())
+                if pixel_hash in view_hashes and not byte_duplicate:
+                    result["duplicate_views"].append((idx, img_path.name, view_hashes[pixel_hash]))
+                view_hashes.setdefault(pixel_hash, img_path.name)
+            _check_decoded_image(img, idx, img_path.name, result, pixels)
     except Exception as e:
         if is_jpeg and isinstance(e, OSError) and "truncated" in str(e).lower():
             result["truncated_imgs"].append((idx, img_path.name))
         result["corrupt_imgs"].append((idx, img_path.name, str(e)))
 
 
-def _check_decoded_image(img, idx, name, result):
+def _check_decoded_image(img, idx, name, result, pixels=None):
     """Check dimensions, color mode, and spatial detail after a full decode."""
     w, h = img.size
     if (w, h) != (1024, 1024):
@@ -1458,7 +1573,8 @@ def _check_decoded_image(img, idx, name, result):
         result["images_ok"] += 1
 
     # Keep the uint8 buffer until blur detection needs float32 pixels.
-    pixels = np.asarray(img)
+    if pixels is None:
+        pixels = np.asarray(img)
     # A view is blank only if EVERY channel has little spatial detail.
     std_val = float(pixels.std(axis=(0, 1)).max())
     if std_val < BLANK_STD_THRESHOLD:
@@ -1468,6 +1584,39 @@ def _check_decoded_image(img, idx, name, result):
     blur_score = _image_blur_score(img, pixels)
     if blur_score < BLUR_THRESHOLD:
         result["blurry_imgs"].append((idx, name, round(blur_score, 2)))
+    elif img.mode == "RGB" and (w, h) == (1024, 1024):
+        side = _image_regional_blur(pixels)
+        if side is not None:
+            result["regional_blurry_imgs"].append((idx, name, side))
+
+
+def _image_regional_blur(pixels):
+    """Find a large low-detail side beside sharp scenery in a 1024x1024 RGB view.
+
+    These conservative thresholds reproduce regional v2 from the photo review.
+    Exclude the upper sky region and require both weak absolute detail/contrast
+    and a strong left/right difference. This is not a general blur classifier.
+    """
+    rgb = pixels.astype(np.float32)
+    small = rgb.reshape(256, 4, 256, 4, 3).mean(axis=(1, 3))
+    gray = small @ np.array([_BT601_R, _BT601_G, _BT601_B], dtype=np.float32)
+    cells = gray.reshape(8, 32, 8, 32).transpose(0, 2, 1, 3)
+    color_cells = small.reshape(8, 32, 8, 32, 3).transpose(0, 2, 1, 3, 4)
+    color_std = color_cells.std(axis=(2, 3)).max(axis=2)
+    laplacian = (cells[..., :-2, 1:-1] + cells[..., 2:, 1:-1]
+                 + cells[..., 1:-1, :-2] + cells[..., 1:-1, 2:]
+                 - 4 * cells[..., 1:-1, 1:-1])
+    focus = laplacian.var(axis=(2, 3))
+    for side, edge, opposite in (("left", slice(0, 2), slice(-2, None)),
+                                 ("right", slice(-2, None), slice(0, 2))):
+        detail = focus[2:, edge]
+        median = float(np.median(detail))
+        other = float(np.median(focus[2:, opposite]))
+        if (median < 8 and np.percentile(detail, 75) < 15
+                and other > 100 and other / (median + .1) > 50
+                and np.median(color_std[2:, edge]) < 8):
+            return side
+    return None
 
 
 def _image_blur_score(img, pixels):
@@ -1570,8 +1719,14 @@ def _check_metadata_provenance(meta, idx, result):
 
     # Capture date format — must be YYYY-MM if present
     date_val = meta.get("date", "")
-    if date_val and not _DATE_RE.match(str(date_val)):
-        result["bad_dates"].append((idx, str(date_val)))
+    if date_val:
+        date_text = str(date_val)
+        try:
+            if not _DATE_RE.fullmatch(date_text):
+                raise ValueError
+            date.fromisoformat(f"{date_text}-01")
+        except ValueError:
+            result["bad_dates"].append((idx, date_text))
 
 
 def _check_metadata_csv_matches(meta, idx, source_coords, completed_panoids, result):
@@ -1588,10 +1743,17 @@ def _check_metadata_csv_matches(meta, idx, source_coords, completed_panoids, res
         meta_lat = meta.get("original_lat")
         meta_lon = meta.get("original_lon")
         if meta_lat is not None and meta_lon is not None:
-            if (abs(float(meta_lat) - src_lat) > COORD_TOLERANCE
-                    or abs(float(meta_lon) - src_lon) > COORD_TOLERANCE):
+            try:
+                parsed_lat = float(meta_lat)
+                parsed_lon = float(meta_lon)
+            except (ValueError, TypeError):
+                # Coordinate validation reports malformed values. Do not turn
+                # otherwise parseable JSON into a generic corruption finding.
+                return
+            if (abs(parsed_lat - src_lat) > COORD_TOLERANCE
+                    or abs(parsed_lon - src_lon) > COORD_TOLERANCE):
                 result["coord_mismatch"] = (
-                    idx, float(meta_lat), float(meta_lon), src_lat, src_lon,
+                    idx, parsed_lat, parsed_lon, src_lat, src_lon,
                 )
 
 
@@ -1642,6 +1804,7 @@ def _new_folder_result(idx):
         size_outliers=[],
         blank_imgs=[],
         blurry_imgs=[],
+        regional_blurry_imgs=[],
         truncated_imgs=[],
         duplicate_views=[],
         unexpected_files=[],
@@ -1734,53 +1897,65 @@ def main():
     args = _parse_args()
 
     data_path = Path(args.data_dir)
+    diagnostics = InputDiagnostics()
 
     print("SALTY Integrity Check")
     print("=" * 60)
-    if not data_path.exists():
-        print(f"ERROR: {data_path} not found")
-        sys.exit(1)
+    try:
+        if not data_path.exists():
+            raise InputValidationError(f"{data_path} not found")
 
-    is_archive = data_path.is_file()
-    if is_archive and data_path.suffix.lower() != ".tar":
-        print(f"ERROR: {data_path} is not an uncompressed .tar archive")
-        sys.exit(1)
+        is_archive = data_path.is_file()
+        if is_archive and data_path.suffix.lower() != ".tar":
+            raise InputValidationError(
+                f"{data_path} is not an uncompressed .tar archive"
+            )
 
-    if is_archive:
-        print(f"Archive: {data_path.resolve()}")
-        try:
+        if is_archive:
+            print(f"Archive: {data_path.resolve()}")
             archive_data = _index_tar_archive(data_path)
-        except ValueError as exc:
-            print(f"ERROR: {exc}")
-            sys.exit(1)
-        print(f"Archive root: {archive_data.root_name}")
-        has_metadata_dir = archive_data.has_metadata_dir
-        if not has_metadata_dir:
-            print("WARNING: metadata/ not found in archive — metadata checks will be skipped")
-        folders = archive_data.folders
-        disk_indices = archive_data.disk_indices
-        metadata_source = archive_data.metadata_indices
-    else:
-        salty_data = data_path
-        images_dir = salty_data / "images"
-        metadata_dir = salty_data / "metadata"
-        print(f"Directory: {salty_data.resolve()}")
-        has_metadata_dir = _validate_dirs(salty_data, images_dir)
-        folders, disk_indices = _collect_folders(images_dir)
-        metadata_source = metadata_dir
+            print(f"Archive root: {archive_data.root_name}")
+            has_metadata_dir = archive_data.has_metadata_dir
+            if not has_metadata_dir:
+                diagnostics.warn(
+                    "metadata/ not found in archive — metadata checks will be skipped"
+                )
+            folders = archive_data.folders
+            disk_indices = archive_data.disk_indices
+            metadata_source = archive_data.metadata_indices
+        else:
+            salty_data = data_path
+            images_dir = salty_data / "images"
+            metadata_dir = salty_data / "metadata"
+            print(f"Directory: {salty_data.resolve()}")
+            has_metadata_dir = _validate_dirs(salty_data, images_dir, diagnostics)
+            folders, disk_indices = _collect_folders(images_dir)
+            metadata_source = metadata_dir
 
-    print()
-    print("Loading CSVs...")
-    if is_archive:
-        csv_data = _load_csv_file_lists(
-            archive_data.completed_files, archive_data.rejected_files,
-        )
-    else:
-        csv_data = _load_csvs(salty_data)
+        print()
+        print("Loading CSVs...")
+        if is_archive:
+            csv_data = _load_csv_file_lists(
+                archive_data.completed_files, archive_data.rejected_files, diagnostics,
+            )
+        else:
+            csv_data = _load_csvs(salty_data, diagnostics)
 
-    source_coords, source_indices = None, None
-    if args.source_csv:
-        source_coords, source_indices = _load_source_csv(Path(args.source_csv))
+        source_coords, source_indices = None, None
+        if args.source_csv:
+            source_coords, source_indices = _load_source_csv(
+                Path(args.source_csv), diagnostics,
+            )
+
+        if (not disk_indices and not csv_data["completed_set"]
+                and not csv_data["rejected_set"]):
+            raise InputValidationError(
+                "dataset contains no numeric image folders and no completed or rejected records"
+            )
+    except (ValueError, OSError, tarfile.TarError) as exc:
+        print(f"ERROR: {exc}")
+        print("Input validation failed; no scan was run and flagged.txt was not changed.")
+        sys.exit(2)
 
     print(f"\nScanning {len(folders):,} image folders with {args.workers} workers...")
 
@@ -1801,6 +1976,7 @@ def main():
     issues, warnings = _print_report(
         findings, derived, disk_indices, has_metadata_dir,
         len(csv_data["rejected_set"]), csv_data["reject_reasons"], source_indices,
+        diagnostics.warning_count,
     )
 
     elapsed = time.time() - t0
