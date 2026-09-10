@@ -224,6 +224,25 @@ class CheckerTests(unittest.TestCase):
         self.save_image(pixels)
         self.assertFalse(self.scan()["blank_imgs"])
 
+    def test_histogram_channel_std_matches_numpy_reference(self):
+        rng = np.random.default_rng(37)
+        rgb = rng.integers(0, 256, (128, 96, 3), dtype=np.uint8)
+        for image in (
+            Image.fromarray(rgb, mode="RGB"),
+            Image.fromarray(rgb[:, :, 0], mode="L"),
+            Image.fromarray(rgb, mode="RGB").convert("CMYK"),
+        ):
+            with self.subTest(mode=image.mode):
+                pixels = np.asarray(image)
+                expected = float(pixels.std(axis=(0, 1)).max())
+                self.assertAlmostEqual(checker._max_channel_std(image), expected, places=7)
+
+    def test_exact_rgb_pool_matches_previous_numpy_calculation(self):
+        rng = np.random.default_rng(41)
+        pixels = rng.integers(0, 256, (1024, 1024, 3), dtype=np.uint8)
+        expected = pixels.astype(np.float32).reshape(256, 4, 256, 4, 3).mean(axis=(1, 3))
+        np.testing.assert_array_equal(checker._average_pool_rgb_4x4(pixels), expected)
+
     def test_grayscale_blank_image_does_not_crash(self):
         self.save_image(np.full((32, 32), 128, dtype=np.uint8))
         result = self.scan()
@@ -604,6 +623,19 @@ class CheckerTests(unittest.TestCase):
         self.assertEqual(len(findings.empty_folders), 33)
         self.assertFalse(findings.missing_meta)
         self.assertFalse(findings.corrupt_meta)
+
+    def test_scan_progress_refresh_is_throttled(self):
+        with mock.patch.object(checker, "tqdm") as progress_factory:
+            progress_factory.return_value.__enter__.return_value = mock.Mock()
+            checker._collect_batched_scan([], mock.Mock(), 1)
+
+        progress_factory.assert_called_once_with(
+            total=0,
+            desc="Scanning",
+            unit="loc",
+            smoothing=0.3,
+            mininterval=checker.SCAN_PROGRESS_MIN_INTERVAL_S,
+        )
 
     def test_tar_order_matches_first_file_or_empty_directory_header(self):
         archive_path = self.write_archive([

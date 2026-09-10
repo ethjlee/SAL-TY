@@ -29,7 +29,7 @@ from itertools import batched
 from math import asin, cos, radians, sin, sqrt
 from pathlib import Path, PurePosixPath
 
-from PIL import Image
+from PIL import Image, ImageStat
 import numpy as np
 import pandas as pd
 import simplejpeg
@@ -79,6 +79,9 @@ COORD_TOLERANCE = 0.001
 # Locations sent to a worker per process-pool task. Batching cuts IPC
 # overhead while keeping only a small amount of work queued at once.
 SCAN_BATCH_SIZE = 16
+
+# Keep the throughput display readable without redrawing it for every fast batch.
+SCAN_PROGRESS_MIN_INTERVAL_S = 1.0
 
 # ITU-R BT.601 luminance weights for fast RGB -> grayscale (avoids second PIL decode)
 _BT601_R, _BT601_G, _BT601_B = 0.299, 0.587, 0.114
@@ -889,7 +892,10 @@ def _collect_batched_scan(folders, submit_batch, n_workers):
         if len(pending) >= max_pending:
             break
 
-    with tqdm(total=len(folders), desc="Scanning", unit="loc", smoothing=0.3) as progress:
+    with tqdm(
+        total=len(folders), desc="Scanning", unit="loc", smoothing=0.3,
+        mininterval=SCAN_PROGRESS_MIN_INTERVAL_S,
+    ) as progress:
         while pending:
             done, pending = wait(pending, return_when=FIRST_COMPLETED)
             for future in done:
@@ -1551,7 +1557,8 @@ def _check_image(img_path, idx, result, read_bytes, view_hashes):
                 return
             pixels = np.asarray(img)
             if img.mode == "RGB":
-                pixel_hash = ("pixels", img.mode, img.size, hashlib.sha256(pixels.tobytes()).digest())
+                pixel_data = pixels if pixels.flags.c_contiguous else np.ascontiguousarray(pixels)
+                pixel_hash = ("pixels", img.mode, img.size, hashlib.sha256(pixel_data).digest())
                 if pixel_hash in view_hashes and not byte_duplicate:
                     result["duplicate_views"].append((idx, img_path.name, view_hashes[pixel_hash]))
                 view_hashes.setdefault(pixel_hash, img_path.name)
@@ -1575,8 +1582,10 @@ def _check_decoded_image(img, idx, name, result, pixels=None):
     # Keep the uint8 buffer until blur detection needs float32 pixels.
     if pixels is None:
         pixels = np.asarray(img)
-    # A view is blank only if EVERY channel has little spatial detail.
-    std_val = float(pixels.std(axis=(0, 1)).max())
+    # A view is blank only if EVERY channel has little spatial detail. Pillow's
+    # histogram statistics are mathematically equivalent for JPEG's integer
+    # image modes and avoid NumPy's much slower full float64 reduction.
+    std_val = _max_channel_std(img)
     if std_val < BLANK_STD_THRESHOLD:
         result["blank_imgs"].append((idx, name, round(std_val, 2)))
         return
@@ -1597,8 +1606,7 @@ def _image_regional_blur(pixels):
     Exclude the upper sky region and require both weak absolute detail/contrast
     and a strong left/right difference. This is not a general blur classifier.
     """
-    rgb = pixels.astype(np.float32)
-    small = rgb.reshape(256, 4, 256, 4, 3).mean(axis=(1, 3))
+    small = _average_pool_rgb_4x4(pixels)
     gray = small @ np.array([_BT601_R, _BT601_G, _BT601_B], dtype=np.float32)
     cells = gray.reshape(8, 32, 8, 32).transpose(0, 2, 1, 3)
     color_cells = small.reshape(8, 32, 8, 32, 3).transpose(0, 2, 1, 3, 4)
@@ -1617,6 +1625,21 @@ def _image_regional_blur(pixels):
                 and np.median(color_std[2:, edge]) < 8):
             return side
     return None
+
+
+def _max_channel_std(img):
+    """Return the largest per-channel population standard deviation."""
+    return float(max(ImageStat.Stat(img).stddev))
+
+
+def _average_pool_rgb_4x4(pixels):
+    """Average 4x4 RGB blocks exactly while avoiding a full-size float copy."""
+    small = np.zeros((256, 256, 3), dtype=np.float32)
+    for row_offset in range(4):
+        for col_offset in range(4):
+            small += pixels[row_offset::4, col_offset::4]
+    small *= 1.0 / 16.0
+    return small
 
 
 def _image_blur_score(img, pixels):
