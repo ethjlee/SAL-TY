@@ -128,6 +128,108 @@ class RejectTests(unittest.TestCase):
         self.assertTrue(record.exists())
         self.assertIn('Could not update reject_list.txt', output.getvalue())
 
+    def test_result_codes_distinguish_benign_skips_from_unfulfilled_entries(self):
+        (self.root / 'rejects.csv').write_text('index,reason\n1,old\n')
+        already_done = reject.do_reject(
+            self.root, [(1, 'already done')], dry_run=True,
+        )
+        self.assertEqual(already_done.skipped, 1)
+        self.assertEqual(already_done.exit_code, 0)
+
+        records = self.root / 'rejected_archive' / 'records'
+        records.mkdir(parents=True)
+        (records / '000002.json').write_text('{}')
+
+        result = reject.do_reject(
+            self.root,
+            [(1, 'already done'), (2, 'blocked'), (3, 'missing')],
+            dry_run=True,
+        )
+
+        self.assertEqual(result.skipped, 1)
+        self.assertEqual(result.blocked, 1)
+        self.assertEqual(result.not_found, 1)
+        self.assertEqual(result.exit_code, 1)
+
+    def test_unreadable_progress_csv_aborts_before_mutation(self):
+        completed = self.root / 'completed.csv'
+        completed.write_text('wrong_column\n1\n')
+
+        result = reject.do_reject(self.root, [(1, 'test')], dry_run=False)
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertEqual(result.errors, 1)
+        self.assertEqual(completed.read_text(), 'wrong_column\n1\n')
+        self.assertFalse((self.root / 'rejected_archive').exists())
+
+    def test_recovery_record_write_failure_is_reported_without_mutation(self):
+        completed = self.root / 'completed.csv'
+        completed.write_text('index,lat,lon,panoid\n1,10,20,pano1\n')
+
+        with mock.patch.object(reject.json, 'dumps', side_effect=TypeError('bad record')):
+            result = reject.do_reject(self.root, [(1, 'test')], dry_run=False)
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertEqual(result.errors, 1)
+        self.assertEqual(pd.read_csv(completed)['index'].tolist(), [1])
+        self.assertFalse((self.root / 'rejects.csv').exists())
+
+    def test_reject_continues_after_one_entry_conflicts(self):
+        completed = self.root / 'completed.csv'
+        completed.write_text(
+            'index,lat,lon,panoid\n1,10,20,pano1\n2,11,21,pano2\n'
+        )
+        live = self.root / 'images' / '000001'
+        live.mkdir(parents=True)
+        (live / 'live.jpg').write_bytes(b'live')
+        archived = self.root / 'rejected_archive' / 'images' / '000001'
+        archived.mkdir(parents=True)
+        (archived / 'old.jpg').write_bytes(b'old')
+
+        result = reject.do_reject(
+            self.root, [(1, 'conflict'), (2, 'works')], dry_run=False,
+        )
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertEqual(result.succeeded, 1)
+        self.assertEqual(result.errors, 1)
+        self.assertEqual(pd.read_csv(completed)['index'].tolist(), [1])
+        self.assertEqual(pd.read_csv(self.root / 'rejects.csv')['index'].tolist(), [2])
+
+    def test_reject_list_refresh_failure_sets_failure_status(self):
+        completed = self.root / 'completed.csv'
+        completed.write_text('index,lat,lon,panoid\n1,10,20,pano1\n')
+
+        with mock.patch.object(reject, '_refresh_reject_list', return_value=False):
+            result = reject.do_reject(self.root, [(1, 'test')], dry_run=False)
+
+        self.assertEqual(result.succeeded, 1)
+        self.assertEqual(result.errors, 1)
+        self.assertEqual(result.exit_code, 1)
+
+    def test_unreadable_recovery_record_sets_failure_status(self):
+        records = self.root / 'rejected_archive' / 'records'
+        records.mkdir(parents=True)
+        (records / '000001.json').write_text('{')
+
+        result = reject.do_undo(self.root, [(1, '')], dry_run=False)
+
+        self.assertEqual(result.succeeded, 0)
+        self.assertEqual(result.errors, 1)
+        self.assertEqual(result.exit_code, 1)
+
+    def test_purge_failure_sets_failure_status(self):
+        archive = self.root / 'rejected_archive'
+        archive.mkdir()
+
+        with mock.patch('builtins.input', return_value='PURGE'):
+            with mock.patch.object(reject.shutil, 'rmtree', side_effect=OSError('busy')):
+                result = reject.do_purge(self.root, dry_run=False)
+
+        self.assertEqual(result.errors, 1)
+        self.assertEqual(result.exit_code, 1)
+        self.assertTrue(archive.exists())
+
     def test_archive_destination_conflict_aborts_entry_without_mutation(self):
         csv = self.root / 'completed.csv'
         csv.write_text('index,lat,lon,panoid\n1,10,20,pano1\n')
@@ -141,7 +243,7 @@ class RejectTests(unittest.TestCase):
 
         result = self.run_cli(answer='yes\n')
 
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn('archive destination', result.stdout)
         self.assertEqual(pd.read_csv(csv)['index'].tolist(), [1])
         self.assertTrue((live / 'live.jpg').exists())
@@ -153,8 +255,10 @@ class RejectTests(unittest.TestCase):
         csv.write_text('index,lat,lon,panoid\n1,10,20,pano1\n')
 
         with mock.patch.object(reject, '_batch_remove_from_csv', return_value=None):
-            reject.do_reject(self.root, [(1, 'test')], dry_run=False)
+            result = reject.do_reject(self.root, [(1, 'test')], dry_run=False)
 
+        self.assertEqual(result.exit_code, 1)
+        self.assertEqual(result.errors, 1)
         self.assertEqual(pd.read_csv(csv)['index'].tolist(), [1])
         self.assertFalse((self.root / 'rejects.csv').exists())
         self.assertTrue((self.root / 'rejected_archive' / 'records' / '000001.json').exists())
@@ -166,8 +270,9 @@ class RejectTests(unittest.TestCase):
         record = self.root / 'rejected_archive' / 'records' / '000001.json'
 
         with mock.patch.object(reject, '_batch_remove_from_csv', return_value=None):
-            reject.do_undo(self.root, [(1, '')], dry_run=False)
+            result = reject.do_undo(self.root, [(1, '')], dry_run=False)
 
+        self.assertEqual(result.exit_code, 1)
         self.assertTrue(record.exists())
         self.assertEqual(pd.read_csv(csv)['index'].tolist(), [1])
         self.assertEqual(pd.read_csv(self.root / 'rejects.csv')['index'].tolist(), [1])
@@ -189,8 +294,10 @@ class RejectTests(unittest.TestCase):
         reject.do_reject(self.root, [(1, 'test')], dry_run=False)
 
         metadata.write_text('conflict')
-        reject.do_undo(self.root, [(1, '')], dry_run=False)
+        result = reject.do_undo(self.root, [(1, '')], dry_run=False)
 
+        self.assertEqual(result.exit_code, 1)
+        self.assertEqual(result.partial, 1)
         record = self.root / 'rejected_archive' / 'records' / '000001.json'
         self.assertTrue(record.exists())
         self.assertTrue(pd.read_csv(csv).empty)
@@ -257,11 +364,12 @@ class RejectTests(unittest.TestCase):
         for args, answer in ((('--reject-all-flagged', '--dry-run'), None),
                              (('--reject-all-flagged',), 'no\n')):
             result = self.run_cli(*args, answer=answer)
-            self.assertEqual(result.returncode, 0, result.stderr)
+            expected_code = 1 if '--dry-run' in args else 0
+            self.assertEqual(result.returncode, expected_code, result.stderr)
             self.assertEqual(self.snapshot(), original)
 
         result = self.run_cli('--reject-all-flagged', answer='yes\n')
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn('2 rejected', result.stdout)
         self.assertIn('1 not found', result.stdout)
         after = self.snapshot()
@@ -282,7 +390,7 @@ class RejectTests(unittest.TestCase):
         self.assertEqual(pd.read_csv(self.root / 'rejects.csv')['index'].tolist(), [1])
         self.assertEqual(pd.read_csv(self.root / 'rejects_100.csv')['index'].tolist(), [2])
         result = self.run_cli('--reject-all-flagged', answer='yes\n')
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn('2 skipped', result.stdout)
         self.assertEqual(self.snapshot(), after)
 
@@ -307,7 +415,7 @@ class RejectTests(unittest.TestCase):
         for name in ('rejects.csv', 'rejects_100.csv'):
             self.assertTrue(pd.read_csv(self.root / name).empty)
         result = self.run_cli('--undo', '--from-file', str(undo), answer='yes\n')
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, 1, result.stderr)
         self.assertEqual(self.snapshot(), restored)
 
     def test_incompatible_modes_are_rejected(self):
