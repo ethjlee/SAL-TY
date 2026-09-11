@@ -32,6 +32,34 @@ class RejectTests(unittest.TestCase):
     def test_default_only_reads_uncommented_entries(self):
         self.assertEqual(reject.parse_index_file(self.flags), [(2, 'manual reason'), (3, 'manual_reject')])
 
+    def test_commented_only_treats_removed_markers_as_keep_decisions(self):
+        entries = reject.parse_index_file(self.flags, commented_only=True)
+        self.assertEqual(entries, [(1, 'blurry_imgs: low score')])
+
+    def test_default_flagged_file_rejects_comments_and_keeps_uncommented(self):
+        csv = self.root / 'completed.csv'
+        csv.write_text('index,lat,lon,panoid\n1,10,20,pano1\n2,11,21,pano2\n')
+        self.flags.write_text('# 1 # reject this\n2 # keep this\n')
+
+        result = self.run_cli('--dry-run')
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Indices : 1', result.stdout)
+        self.assertIn('[DRY RUN] 000001', result.stdout)
+        self.assertNotIn('[DRY RUN] 000002', result.stdout)
+
+    def test_explicit_flagged_file_uses_same_review_convention(self):
+        csv = self.root / 'completed.csv'
+        csv.write_text('index,lat,lon,panoid\n1,10,20,pano1\n2,11,21,pano2\n')
+        self.flags.write_text('# 1 # reject this\n2 # keep this\n')
+
+        result = self.run_cli('--from-file', str(self.flags), '--dry-run')
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Indices : 1', result.stdout)
+        self.assertIn('[DRY RUN] 000001', result.stdout)
+        self.assertNotIn('[DRY RUN] 000002', result.stdout)
+
     def test_all_flags_preserves_reasons_and_deduplicates(self):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
@@ -69,12 +97,12 @@ class RejectTests(unittest.TestCase):
         csv = self.root / 'completed.csv'
         csv.write_text('index,lat,lon,panoid\n1,10,20,pano1\n2,11,21,pano2\n3,12,22,pano3\n')
 
-        self.flags.write_text('1 # first batch\n')
+        self.flags.write_text('# 1 # first batch\n')
         first = self.run_cli(answer='yes\n')
         self.assertEqual(first.returncode, 0, first.stderr)
         self.assertEqual((self.root / 'reject_list.txt').read_text(), '1\n')
 
-        self.flags.write_text('2 # second batch\n')
+        self.flags.write_text('# 2 # second batch\n')
         second = self.run_cli(answer='yes\n')
         self.assertEqual(second.returncode, 0, second.stderr)
         self.assertEqual((self.root / 'reject_list.txt').read_text(), '1\n2\n')
@@ -89,7 +117,7 @@ class RejectTests(unittest.TestCase):
     def test_subset_undo_keeps_other_entries_in_automatic_list(self):
         csv = self.root / 'completed.csv'
         csv.write_text('index,lat,lon,panoid\n1,10,20,pano1\n2,11,21,pano2\n')
-        self.flags.write_text('1\n2\n')
+        self.flags.write_text('# 1\n# 2\n')
         rejected = self.run_cli(answer='yes\n')
         self.assertEqual(rejected.returncode, 0, rejected.stderr)
 
@@ -103,7 +131,7 @@ class RejectTests(unittest.TestCase):
     def test_purge_clears_automatic_reject_list(self):
         csv = self.root / 'completed.csv'
         csv.write_text('index,lat,lon,panoid\n1,10,20,pano1\n')
-        self.flags.write_text('1\n')
+        self.flags.write_text('# 1\n')
         rejected = self.run_cli(answer='yes\n')
         self.assertEqual(rejected.returncode, 0, rejected.stderr)
         self.assertEqual((self.root / 'reject_list.txt').read_text(), '1\n')
@@ -239,7 +267,7 @@ class RejectTests(unittest.TestCase):
         archived = self.root / 'rejected_archive' / 'images' / '000001'
         archived.mkdir(parents=True)
         (archived / 'old.jpg').write_bytes(b'old')
-        self.flags.write_text('1\n')
+        self.flags.write_text('# 1\n')
 
         result = self.run_cli(answer='yes\n')
 

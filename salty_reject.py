@@ -9,11 +9,13 @@ Usage:
     uv run salty_reject.py <data_dir> --undo [--from-file undo_subset.txt] [--dry-run]
     uv run salty_reject.py <data_dir> --purge [--dry-run]
 
-If --from-file is omitted, reject mode uses <data_dir>/flagged.txt and undo mode
-uses the automatically maintained <data_dir>/reject_list.txt.
-Use --reject-all-flagged to include entries with a leading '#', without editing
-flagged.txt. Headers and notes are ignored; duplicate indices use the first reason.
-Without this option, only uncommented entries are processed.
+If --from-file is omitted, reject mode uses <data_dir>/flagged.txt as a review
+queue: numeric entries with a leading '#' are selected for rejection, and removing
+the '#' marks an entry to keep. Undo mode uses the automatically maintained
+<data_dir>/reject_list.txt. Explicit --from-file lists in reject mode use the
+same review convention. Undo subset files use uncommented numeric entries.
+Use --reject-all-flagged to process both commented and uncommented numeric entries.
+Headers and notes are ignored; duplicate indices use the first reason.
 Add --dry-run to preview changes. Actual rejection still asks for 'yes' and
 archives entries for undo. --reject-all-flagged also works with --from-file,
 but cannot be combined with --undo or --purge.
@@ -191,13 +193,17 @@ def _refresh_reject_list(paths):
 # Input parsing
 # ---------------------------------------------------------------------------
 
-def parse_index_file(path, include_commented=False):
+def parse_index_file(path, include_commented=False, commented_only=False):
     """
     Parse a file of indices (one per line).
     Format: <index>  # optional reason comment
     With include_commented, also accept commented indices from flagged.txt.
+    With commented_only, accept only commented numeric entries. This is the review
+    convention used by the automatically selected <data_dir>/flagged.txt.
     Returns list of (idx, reason) tuples, deduplicated (first occurrence wins).
     """
+    if include_commented and commented_only:
+        raise ValueError("include_commented and commented_only are mutually exclusive")
     seen = {}
     with open(path, encoding="utf-8") as f:
         for line in f:
@@ -205,13 +211,16 @@ def parse_index_file(path, include_commented=False):
             if not line:
                 continue
             if line.startswith("#"):
-                if not include_commented:
+                if not (include_commented or commented_only):
                     continue
                 line = line[1:].strip()
                 # Only treat numeric entries as flags, not headers or notes.
                 token = line.split("#", 1)[0].strip()
                 if not (token.isascii() and token.isdigit()):
                     continue
+            elif commented_only:
+                # Removing the marker from a generated flag approves/keeps it.
+                continue
             parts = line.split("#", 1)
             token = parts[0].strip()
             reason = parts[1].strip() if len(parts) > 1 else "manual_reject"
@@ -732,7 +741,7 @@ def main():
     parser = argparse.ArgumentParser(description="SALTY reject tool")
     parser.add_argument("data_dir", help="Path to salty_data directory")
     parser.add_argument("--from-file", metavar="FILE",
-                        help="File of indices to reject, or an optional undo subset (one per line)")
+                        help="Flag review file to reject, or an optional uncommented undo subset")
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("--undo", action="store_true",
                             help="Restore rejected entries; defaults to the generated reject_list.txt")
@@ -741,7 +750,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true",
                         help="Show what would happen without making any changes")
     parser.add_argument("--reject-all-flagged", action="store_true",
-                        help="Reject all listed indices, including commented entries in flagged.txt")
+                        help="Reject all numeric entries, ignoring keep markers in flagged.txt")
     args = parser.parse_args()
     if args.reject_all_flagged and (args.undo or args.purge):
         parser.error("--reject-all-flagged cannot be used with --undo or --purge")
@@ -792,6 +801,7 @@ def main():
         try:
             index_reasons = parse_index_file(
                 from_file, include_commented=args.reject_all_flagged,
+                commented_only=not args.undo and not args.reject_all_flagged,
             )
         except OSError as e:
             print(f"ERROR: could not read {from_file}: {e}")

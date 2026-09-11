@@ -469,8 +469,8 @@ def write_flagged_export(path, sections):
     total = 0
     lines = [
         f"# SALTY flagged locations — {date.today()}",
-        "# Entries are commented out by default (safe). Remove the leading '# ' to reject.",
-        "# Run: uv run salty_reject.py <data_dir> --from-file flagged.txt",
+        "# Commented numeric entries are selected for rejection. Remove the leading '# ' to keep.",
+        "# Preview: uv run salty_reject.py <data_dir> --dry-run",
     ]
     for label, entries in sections:
         if not entries:
